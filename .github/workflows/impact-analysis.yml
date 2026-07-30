@@ -22,7 +22,7 @@ jobs:
     runs-on: [self-hosted]
     steps:
       - name: Trigger Impact Analysis pipeline
-        shell: pwsh
+        shell: powershell
         env:
           IMPACT_API_URL: ${{ vars.IMPACT_API_URL || 'http://localhost:8000' }}
           IMPACT_API_TOKEN: ${{ secrets.IMPACT_API_TOKEN }}
