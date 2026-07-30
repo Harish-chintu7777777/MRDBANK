@@ -1,0 +1,247 @@
+* ============================================================
+* NAME     : LNMOS003
+* TYPE     : Subprogram (CALLNAT target)
+* LIBRARY  : MRDLNLIB
+* OBJECT   : LNMOS003
+* PURPOSE  : Loan Master Update Subprogram. Updates non-financial
+*            status and classification fields on FILE 200 (LOAN
+*            MASTER). Financial balance fields (LJ, LK, LV, LW,
+*            LX, LY, LZ, MM) are NEVER updated here — those are
+*            exclusively owned by LNRPS001 (repayment), LNDSP001
+*            (disbursement), and LNIAP001 (accrual).
+*            Enforces optimistic locking via RECORD-VERSION check.
+*            Flag-based update: only fields with Y-flag are written.
+* PREDICT  : Custom inline PARAMETER section
+* CALLED BY: LNMOP001 (status change online — SA to DI trigger)
+*            LNNPAP01 (NPA batch — NPA classification fields)
+*            LNRPP011 (repayment batch — status OD/AC after posting)
+*            LNIAP020 (rate reset batch — variable rate loans)
+* CALLS    : LNMOS001 (re-reads FILE 200 with HOLD for version check)
+*            CMUTS007 (audit trail — before and after images)
+* DEPENDS  : GDA CMDAG001
+*            FILE 200 MRD-LOANS-LOANMSTR (UPDATE)
+*            FILE 010 MRD-SHARED-AUDIT   (via CMUTS007)
+* ET/BT    : Issues ET on success. Issues BT on version conflict
+*            or ADABAS error. ET covers FILE 200 + FILE 010.
+* CALL DEPTH: Level 2. Calls LNMOS001(L3), CMUTS007(L3).
+* ============================================================
+DEFINE DATA
+  GLOBAL USING CMDAG001
+  PARAMETER
+    1 #P-LOAN-ACCOUNT-NUMBER  (A12)   /* IN: Loan to update
+    1 #P-RECORD-VERSION       (P5)    /* IN: Version from prior LNMOS001 read
+    /* Status update */
+    1 #P-UPDATE-STATUS        (A1)    /* IN: Y = apply status change
+    1 #P-NEW-LOAN-STATUS      (A2)    /* IN: SA DI AC OD NP ST WO RS
+    /* NPA classification update */
+    1 #P-UPDATE-NPA           (A1)    /* IN: Y = update NPA fields
+    1 #P-NEW-NPA-CATEGORY     (A1)    /* IN: N S D L
+    1 #P-NEW-NPA-CLASS-DATE   (P8)    /* IN: YYYYMMDD — date of classification
+    1 #P-NEW-NPA-PROV-PCT     (P5)    /* IN: Provision % (3.2 packed)
+    1 #P-NEW-NPA-PROV-AMT     (P15)   /* IN: Provision amount
+    1 #P-NEW-OVERDUE-DAYS     (N3)    /* IN: Days since oldest unpaid EMI
+    /* Restructure update */
+    1 #P-UPDATE-RESTRUCTURE   (A1)    /* IN: Y = apply restructure fields
+    1 #P-NEW-RESTRUCTURE-FLAG (A1)    /* IN: Y/N
+    1 #P-NEW-RESTRUCTURE-DATE (P8)    /* IN: YYYYMMDD
+    1 #P-NEW-RESTRUCTURE-CNT  (N3)    /* IN: Cumulative restructure count
+    1 #P-NEW-RESTRUCT-PRINC   (P15)   /* IN: Outstanding at time of restructure
+    1 #P-NEW-MATURITY-DATE    (P8)    /* IN: Revised maturity date after restructure
+    /* Write-off update */
+    1 #P-UPDATE-WRITEOFF      (A1)    /* IN: Y = apply write-off fields
+    1 #P-NEW-WRITEOFF-DATE    (P8)    /* IN: YYYYMMDD
+    1 #P-NEW-WRITEOFF-AMOUNT  (P15)   /* IN: Amount written off
+    1 #P-NEW-WRITEOFF-AUTH    (A8)    /* IN: Authoriser user ID (Head Credit)
+    /* Interest rate reset (variable rate loans only) */
+    1 #P-UPDATE-RATE          (A1)    /* IN: Y = apply rate change
+    1 #P-NEW-INTEREST-RATE    (P7)    /* IN: New effective rate (5.2 packed)
+    1 #P-NEW-EMI-AMOUNT       (P15)   /* IN: Recalculated EMI at new rate
+    /* Collateral revaluation */
+    1 #P-UPDATE-COLLATERAL    (A1)    /* IN: Y = update collateral value
+    1 #P-NEW-COLLATERAL-VALUE (P15)   /* IN: New market value
+    1 #P-NEW-COLLATERAL-DATE  (P8)    /* IN: YYYYMMDD of new valuation
+    /* Linked CASA change */
+    1 #P-UPDATE-LINKED-CASA   (A1)    /* IN: Y = change EMI debit account
+    1 #P-NEW-LINKED-CASA-ACCT (A11)   /* IN: New CASA account -> FILE 100 AA
+    /* Output */
+    1 #P-RESPONSE-CODE        (N4)
+      /* 0000 = Updated successfully
+      /* 1004 = Record version mismatch — concurrent update detected
+      /* 1010 = Loan account number blank
+      /* 9001 = ADABAS re-read error
+      /* 9002 = ADABAS update error
+    1 #P-RESPONSE-TEXT        (A80)
+    1 #P-ADABAS-RESPONSE      (N3)
+  LOCAL
+    1 LN-VIEW VIEW OF MRD-LOANS-LOANMSTR
+      2 LA    /* LOAN-ACCOUNT-NUMBER
+      2 LE    /* LOAN-STATUS
+      2 LH    /* MATURITY-DATE
+      2 LL    /* INTEREST-RATE
+      2 LN    /* EMI-AMOUNT
+      2 MA    /* NPA-CATEGORY
+      2 MB    /* NPA-CLASSIFICATION-DATE
+      2 MC    /* NPA-PROVISION-PERCENT
+      2 MD    /* NPA-PROVISION-AMOUNT
+      2 ME    /* OVERDUE-DAYS
+      2 MF    /* LINKED-CASA-ACCOUNT
+      2 MH    /* COLLATERAL-VALUE
+      2 MI    /* COLLATERAL-VALUATION-DATE
+      2 MP    /* RESTRUCTURE-FLAG
+      2 MQ    /* RESTRUCTURE-DATE
+      2 MR    /* RESTRUCTURE-COUNT
+      2 MS    /* RESTRUCTURE-PRINCIPAL-OUTSTANDING
+      2 MT    /* WRITE-OFF-DATE
+      2 MU    /* WRITE-OFF-AMOUNT
+      2 MV    /* WRITE-OFF-AUTHORISER
+      2 FC    /* LAST-UPDATED-BY
+      2 FD    /* LAST-UPDATED-TIMESTAMP
+      2 FE    /* LAST-UPDATED-PROGRAM
+      2 FF    /* RECORD-VERSION
+    /* Re-read PDA for LNMOS001 H-mode call */
+    1 #LNMOA001-PDA PARAMETER USING LNMOA001
+    /* Audit */
+    1 #BEFORE-STATUS          (A2)
+    1 #BEFORE-NPA-CAT         (A1)
+    1 #AUD-RESP               (N4)
+    1 #AUD-TEXT               (A80)
+END-DEFINE
+
+* ── Step 1: Input validation ───────────────────────────────
+IF #P-LOAN-ACCOUNT-NUMBER = ' '
+  MOVE 1010 TO #P-RESPONSE-CODE
+  MOVE 'LOAN ACCOUNT NUMBER IS BLANK' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+IF #P-RECORD-VERSION = 0
+  MOVE 1004 TO #P-RESPONSE-CODE
+  MOVE 'RECORD VERSION ZERO - READ LOAN BEFORE UPDATE' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Step 2: Re-read with HOLD for version check ────────────
+* CALL DEPTH: LNMOS003(L2) -> LNMOS001(L3)
+MOVE #P-LOAN-ACCOUNT-NUMBER TO #LNMOA001-PDA.#P-LOAN-ACCOUNT-NUMBER
+MOVE 'H'                    TO #LNMOA001-PDA.#P-LOCK-MODE
+
+CALLNAT 'LNMOS001'
+  #LNMOA001-PDA.#P-LOAN-ACCOUNT-NUMBER
+  #LNMOA001-PDA.#P-LOCK-MODE
+  #LNMOA001-PDA.#P-LOAN-RECORD
+  #LNMOA001-PDA.#P-RESPONSE-CODE
+  #LNMOA001-PDA.#P-RESPONSE-TEXT
+  #LNMOA001-PDA.#P-ADABAS-RESPONSE
+
+IF #LNMOA001-PDA.#P-RESPONSE-CODE NE 0
+  MOVE #LNMOA001-PDA.#P-RESPONSE-CODE TO #P-RESPONSE-CODE
+  MOVE #LNMOA001-PDA.#P-RESPONSE-TEXT TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Step 3: Optimistic lock — version must match ───────────
+IF #LNMOA001-PDA.#P-LOAN-RECORD.#P-RECORD-VERSION NE #P-RECORD-VERSION
+  MOVE 1004 TO #P-RESPONSE-CODE
+  MOVE 'VERSION CONFLICT - LOAN RECORD CHANGED BY ANOTHER USER' TO #P-RESPONSE-TEXT
+  BT                              /* Release HOLD
+  ESCAPE ROUTINE
+END-IF
+
+* ── Step 4: Capture before images for audit ────────────────
+MOVE #LNMOA001-PDA.#P-LOAN-RECORD.#P-LOAN-STATUS    TO #BEFORE-STATUS
+MOVE #LNMOA001-PDA.#P-LOAN-RECORD.#P-NPA-CATEGORY   TO #BEFORE-NPA-CAT
+
+* ── Step 5: Apply updates to ADABAS view ───────────────────
+FIND LN-VIEW WITH HOLD LA = #P-LOAN-ACCOUNT-NUMBER
+  IF *ADABAS-RESPONSE NE 0
+    MOVE *ADABAS-RESPONSE TO #SYS-LAST-ADABAS-RESPONSE
+    MOVE 'LNMOS003'       TO #SYS-LAST-ERROR-PROGRAM
+    MOVE 9001             TO #P-RESPONSE-CODE
+    MOVE 'FILE 200 FIND-WITH-HOLD FAILED' TO #P-RESPONSE-TEXT
+    MOVE *ADABAS-RESPONSE TO #P-ADABAS-RESPONSE
+    BT
+    ESCAPE ROUTINE
+  END-IF
+
+  IF #P-UPDATE-STATUS = 'Y'
+    MOVE #P-NEW-LOAN-STATUS TO LN-VIEW.LE
+  END-IF
+
+  IF #P-UPDATE-NPA = 'Y'
+    MOVE #P-NEW-NPA-CATEGORY   TO LN-VIEW.MA
+    MOVE #P-NEW-NPA-CLASS-DATE TO LN-VIEW.MB
+    MOVE #P-NEW-NPA-PROV-PCT   TO LN-VIEW.MC
+    MOVE #P-NEW-NPA-PROV-AMT   TO LN-VIEW.MD
+    MOVE #P-NEW-OVERDUE-DAYS   TO LN-VIEW.ME
+  END-IF
+
+  IF #P-UPDATE-RESTRUCTURE = 'Y'
+    MOVE #P-NEW-RESTRUCTURE-FLAG TO LN-VIEW.MP
+    MOVE #P-NEW-RESTRUCTURE-DATE TO LN-VIEW.MQ
+    MOVE #P-NEW-RESTRUCTURE-CNT  TO LN-VIEW.MR
+    MOVE #P-NEW-RESTRUCT-PRINC   TO LN-VIEW.MS
+    MOVE #P-NEW-MATURITY-DATE    TO LN-VIEW.LH
+    MOVE 'RS'                    TO LN-VIEW.LE  /* Force status = Restructured
+  END-IF
+
+  IF #P-UPDATE-WRITEOFF = 'Y'
+    MOVE #P-NEW-WRITEOFF-DATE   TO LN-VIEW.MT
+    MOVE #P-NEW-WRITEOFF-AMOUNT TO LN-VIEW.MU
+    MOVE #P-NEW-WRITEOFF-AUTH   TO LN-VIEW.MV
+    MOVE 'WO'                   TO LN-VIEW.LE  /* Force status = WrittenOff
+  END-IF
+
+  IF #P-UPDATE-RATE = 'Y'
+    MOVE #P-NEW-INTEREST-RATE TO LN-VIEW.LL
+    MOVE #P-NEW-EMI-AMOUNT    TO LN-VIEW.LN
+  END-IF
+
+  IF #P-UPDATE-COLLATERAL = 'Y'
+    MOVE #P-NEW-COLLATERAL-VALUE TO LN-VIEW.MH
+    MOVE #P-NEW-COLLATERAL-DATE  TO LN-VIEW.MI
+  END-IF
+
+  IF #P-UPDATE-LINKED-CASA = 'Y'
+    MOVE #P-NEW-LINKED-CASA-ACCT TO LN-VIEW.MF
+  END-IF
+
+  /* Always update audit and version fields */
+  MOVE #SYS-USER-ID          TO LN-VIEW.FC
+  MOVE *TIMX                 TO LN-VIEW.FD
+  MOVE 'LNMOS003'            TO LN-VIEW.FE
+  COMPUTE LN-VIEW.FF = #P-RECORD-VERSION + 1
+
+  UPDATE
+
+  IF *ADABAS-RESPONSE NE 0
+    MOVE *ADABAS-RESPONSE TO #SYS-LAST-ADABAS-RESPONSE
+    MOVE 'LNMOS003'       TO #SYS-LAST-ERROR-PROGRAM
+    MOVE 9002             TO #P-RESPONSE-CODE
+    MOVE 'FILE 200 UPDATE FAILED' TO #P-RESPONSE-TEXT
+    MOVE *ADABAS-RESPONSE TO #P-ADABAS-RESPONSE
+    BT
+    ESCAPE ROUTINE
+  END-IF
+
+END-FIND
+
+* ── Step 6: Audit trail ────────────────────────────────────
+* CALL DEPTH: LNMOS003(L2) -> CMUTS007(L3)
+CALLNAT 'CMUTS007'
+  'UPDT'
+  'LOAN'
+  #P-LOAN-ACCOUNT-NUMBER
+  200
+  #BEFORE-STATUS
+  #P-NEW-LOAN-STATUS
+  'LNMOS003'
+  #AUD-RESP
+  #AUD-TEXT
+
+* ── Step 7: Commit ─────────────────────────────────────────
+ET
+
+MOVE 0000 TO #P-RESPONSE-CODE
+MOVE 'LOAN MASTER UPDATED SUCCESSFULLY' TO #P-RESPONSE-TEXT
+
+END

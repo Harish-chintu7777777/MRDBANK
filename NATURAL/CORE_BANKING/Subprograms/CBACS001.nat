@@ -1,0 +1,161 @@
+* ============================================================
+* NAME     : CBACS001
+* TYPE     : Subprogram (CALLNAT target)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBACS001
+* PURPOSE  : Account Read Subprogram. Single point of access for
+*            reading FILE 100 (ACCOUNT MASTER). All programs in
+*            all domains call this subprogram — none read FILE 100
+*            directly (except LEGACY: CBGLP001, approved by CAB 2019).
+*            Supports Read-only (R) and Hold (H) modes.
+* PREDICT  : PDA CBACA001
+* CALLED BY: CBACP001 (account enquiry online)
+*            CBACP002 (account update online — H mode)
+*            CBTXS001 (transaction post — H mode for balance update)
+*            CBTXVD01 (transaction validation — R mode)
+*            CBACVD01 (account validation — R mode)
+*            LNMOS001 (loans — balance before disbursement — R)
+*            PYINR001 (payments — status check before instruction — R)
+*            FDSCP010 (fraud scoring — R mode)
+* DEPENDS  : GDA CMDAG001
+*            FILE 100 MRD-COREBKG-ACCTMSTR (read)
+* ADABAS   : FILE 100 — FIND with descriptor AA (ACCOUNT-NUMBER).
+*            H mode: FIND with HOLD option.
+* CALL DEPTH: Level 2 (called by Level 1 drivers and Level 3 engines)
+* ============================================================
+DEFINE DATA
+  GLOBAL   USING CMDAG001
+  PARAMETER USING CBACA001
+  LOCAL
+    1 ACCT-VIEW VIEW OF MRD-COREBKG-ACCTMSTR
+      2 AA    /* ACCOUNT-NUMBER
+      2 AB    /* CUSTOMER-ID
+      2 AC    /* PRODUCT-CODE
+      2 AD    /* ACCOUNT-TYPE
+      2 AE    /* ACCOUNT-STATUS
+      2 AF    /* DATE-OPENED
+      2 AG    /* DATE-CLOSED
+      2 AH    /* CURRENCY-CODE
+      2 AI    /* CURRENT-BALANCE
+      2 AJ    /* AVAILABLE-BALANCE
+      2 AK    /* CLEARED-BALANCE
+      2 AL    /* UNCLEARED-BALANCE
+      2 AM    /* OVERDRAFT-LIMIT
+      2 AN    /* OVERDRAFT-EXPIRY-DATE
+      2 AO    /* LIEN-AMOUNT
+      2 AP    /* INTEREST-RATE-CODE
+      2 AQ    /* CHARGE-SCHEDULE-CODE
+      2 AR    /* STATEMENT-CYCLE
+      2 AT    /* BRANCH-CODE
+      2 AU    /* RELATIONSHIP-MGR-ID
+      2 AV    /* LAST-TRANSACTION-DATE
+      2 AW    /* LAST-STATEMENT-DATE
+      2 AX    /* ACCRUED-INTEREST-DR
+      2 AY    /* ACCRUED-INTEREST-CR
+      2 AZ    /* ACCRUED-CHARGES
+      2 BA    /* INTEREST-DUE-DATE
+      2 BB    /* CHARGE-DUE-DATE
+      2 BC    /* FREEZE-REASON-CODE
+      2 BD    /* FREEZE-DATE
+      2 BE    /* FREEZE-AUTHORISER
+      2 BF    /* DORMANCY-DATE
+      2 BG    /* DORMANCY-REASON
+      2 BH    /* JOINT-ACCOUNT-FLAG
+      2 BI    /* MANDATE-TYPE
+      2 BJ    /* LINKED-LOAN-ACCOUNT
+      2 BM    /* OFAC-FLAG
+      2 BN    /* OFAC-LAST-CHECKED
+      2 BO    /* TAX-WITHHOLDING-FLAG
+      2 BP    /* TDS-RATE
+      2 FA    /* CREATED-BY-USER-ID
+      2 FB    /* CREATED-TIMESTAMP
+      2 FC    /* LAST-UPDATED-BY
+      2 FD    /* LAST-UPDATED-TIMESTAMP
+      2 FE    /* LAST-UPDATED-PROGRAM
+      2 FF    /* RECORD-VERSION
+END-DEFINE
+
+* ── Input validation ───────────────────────────────────────
+IF #P-ACCOUNT-NUMBER = ' '
+  MOVE 1010 TO #P-RESPONSE-CODE
+  MOVE 'ACCOUNT NUMBER IS BLANK' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+IF #P-LOCK-MODE NE 'R' AND #P-LOCK-MODE NE 'H'
+  MOVE 'R' TO #P-LOCK-MODE          /* Default to read-only if invalid
+END-IF
+
+* ── Read from ADABAS FILE 100 ──────────────────────────────
+IF #P-LOCK-MODE = 'H'
+  FIND ACCT-VIEW WITH HOLD AA = #P-ACCOUNT-NUMBER
+    PERFORM POPULATE-OUTPUT
+  END-FIND
+ELSE
+  FIND ACCT-VIEW AA = #P-ACCOUNT-NUMBER
+    PERFORM POPULATE-OUTPUT
+  END-FIND
+END-IF
+
+* ── Check if record was found ──────────────────────────────
+IF #P-RESPONSE-CODE = 0
+  /* Response still zero — FIND completed without setting it.
+  /* This means no record was found.
+  MOVE 1011 TO #P-RESPONSE-CODE
+  MOVE 'ACCOUNT NOT FOUND IN FILE 100' TO #P-RESPONSE-TEXT
+END-IF
+
+ESCAPE ROUTINE
+
+* ──────────────────────────────────────────────────────────
+DEFINE SUBROUTINE POPULATE-OUTPUT
+* ──────────────────────────────────────────────────────────
+  IF *ADABAS-RESPONSE NE 0
+    MOVE *ADABAS-RESPONSE  TO #SYS-LAST-ADABAS-RESPONSE
+    MOVE 'CBACS001'        TO #SYS-LAST-ERROR-PROGRAM
+    MOVE 9001              TO #P-RESPONSE-CODE
+    MOVE 'ADABAS READ ERROR ON FILE 100' TO #P-RESPONSE-TEXT
+    MOVE *ADABAS-RESPONSE  TO #P-ADABAS-RESPONSE
+    ESCAPE ROUTINE
+  END-IF
+
+  /* Map DDM view fields to PDA output ----------------------
+  MOVE ACCT-VIEW.AA  TO #P-ACCOUNT-RECORD.#P-ACCOUNT-NUMBER
+  MOVE ACCT-VIEW.AB  TO #P-ACCOUNT-RECORD.#P-CUSTOMER-ID
+  MOVE ACCT-VIEW.AC  TO #P-ACCOUNT-RECORD.#P-PRODUCT-CODE
+  MOVE ACCT-VIEW.AD  TO #P-ACCOUNT-RECORD.#P-ACCOUNT-TYPE
+  MOVE ACCT-VIEW.AE  TO #P-ACCOUNT-RECORD.#P-ACCOUNT-STATUS
+  MOVE ACCT-VIEW.AF  TO #P-ACCOUNT-RECORD.#P-DATE-OPENED
+  MOVE ACCT-VIEW.AG  TO #P-ACCOUNT-RECORD.#P-DATE-CLOSED
+  MOVE ACCT-VIEW.AH  TO #P-ACCOUNT-RECORD.#P-CURRENCY-CODE
+  MOVE ACCT-VIEW.AI  TO #P-ACCOUNT-RECORD.#P-CURRENT-BALANCE
+  MOVE ACCT-VIEW.AJ  TO #P-ACCOUNT-RECORD.#P-AVAILABLE-BALANCE
+  MOVE ACCT-VIEW.AK  TO #P-ACCOUNT-RECORD.#P-CLEARED-BALANCE
+  MOVE ACCT-VIEW.AL  TO #P-ACCOUNT-RECORD.#P-UNCLEARED-BALANCE
+  MOVE ACCT-VIEW.AM  TO #P-ACCOUNT-RECORD.#P-OVERDRAFT-LIMIT
+  MOVE ACCT-VIEW.AO  TO #P-ACCOUNT-RECORD.#P-LIEN-AMOUNT
+  MOVE ACCT-VIEW.AX  TO #P-ACCOUNT-RECORD.#P-ACCRUED-INTEREST-DR
+  MOVE ACCT-VIEW.AY  TO #P-ACCOUNT-RECORD.#P-ACCRUED-INTEREST-CR
+  MOVE ACCT-VIEW.AZ  TO #P-ACCOUNT-RECORD.#P-ACCRUED-CHARGES
+  MOVE ACCT-VIEW.AP  TO #P-ACCOUNT-RECORD.#P-INTEREST-RATE-CODE
+  MOVE ACCT-VIEW.AQ  TO #P-ACCOUNT-RECORD.#P-CHARGE-SCHEDULE-CODE
+  MOVE ACCT-VIEW.AT  TO #P-ACCOUNT-RECORD.#P-BRANCH-CODE
+  MOVE ACCT-VIEW.AU  TO #P-ACCOUNT-RECORD.#P-RELATIONSHIP-MGR-ID
+  MOVE ACCT-VIEW.AV  TO #P-ACCOUNT-RECORD.#P-LAST-TRANSACTION-DATE
+  MOVE ACCT-VIEW.BF  TO #P-ACCOUNT-RECORD.#P-DORMANCY-DATE
+  MOVE ACCT-VIEW.BC  TO #P-ACCOUNT-RECORD.#P-FREEZE-REASON-CODE
+  MOVE ACCT-VIEW.BD  TO #P-ACCOUNT-RECORD.#P-FREEZE-DATE
+  MOVE ACCT-VIEW.BM  TO #P-ACCOUNT-RECORD.#P-OFAC-FLAG
+  MOVE ACCT-VIEW.BO  TO #P-ACCOUNT-RECORD.#P-TAX-WITHHOLDING-FLAG
+  MOVE ACCT-VIEW.BP  TO #P-ACCOUNT-RECORD.#P-TDS-RATE
+  MOVE ACCT-VIEW.FF  TO #P-ACCOUNT-RECORD.#P-RECORD-VERSION
+
+  MOVE 0000          TO #P-RESPONSE-CODE
+  MOVE 'ACCOUNT READ SUCCESSFUL' TO #P-RESPONSE-TEXT
+  MOVE 0             TO #P-ADABAS-RESPONSE
+
+  ESCAPE ROUTINE              /* Exit FIND loop after first (unique) record
+
+END-SUBROUTINE
+
+END

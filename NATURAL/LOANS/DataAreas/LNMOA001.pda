@@ -1,0 +1,113 @@
+* ============================================================
+* NAME     : LNMOA001
+* TYPE     : Parameter Data Area (PDA)
+* LIBRARY  : MRDLNLIB
+* OBJECT   : LNMOA001
+* PURPOSE  : CALLNAT interface contract for LNMOS001 (Loan Master
+*            Read Subprogram). Callers in any domain use this PDA.
+*            Caller sets IN fields; subprogram returns OUT fields.
+* PREDICT  : Registered under MRDDDMLIB
+* USED BY  : LNMOP001  (loan origination online — sanction check)
+*            LNIQP001  (loan inquiry online)
+*            LNRPS001  (repayment — reads balances before posting)
+*            LNIAP001  (accrual — reads rate + outstanding principal)
+*            LNDSP001  (disbursement — reads sanction/disbursed amounts)
+*            LNNPAP01  (NPA batch — reads overdue days + status)
+*            CBACS001  (core banking — reads MF linked-CASA for BJ link)
+*            PYINR001  (payments — status check before instruction)
+* CHANGED  : 1994-06-15  Initial creation.
+*            2001-03-22  Added P-NPA fields to output section.
+*            2014-11-01  Added P-OVERDUE-* fields to output section.
+*            2019-05-20  Added P-RECORD-VERSION for optimistic locking.
+* CAUTION  : Changes to this PDA require recompile of ALL callers.
+*            Raise CAB change request before any modification.
+*            Add new output fields at END only to avoid layout shift.
+* ============================================================
+DEFINE DATA PARAMETER
+
+  * -- Input Parameters -----------------------------------------
+  1 #P-LOAN-ACCOUNT-NUMBER           (A12)   /* IN
+    /* Loan account number to read. Must be Luhn-valid.
+    /* Space = invalid. Subprogram returns response 1010 if blank.
+
+  1 #P-LOCK-MODE                     (A1)    /* IN
+    /* R = Read-only (no HOLD placed on ADABAS record).
+    /* H = Hold    (places ADABAS HOLD for subsequent UPDATE).
+    /* H must be used when caller intends to call LNMOS003 (update).
+    /* HOLD is released on ET or BT. Timeout = 90 seconds (ADABAS nucleus).
+
+  * -- Output: Loan Identity ------------------------------------
+  1 #P-LOAN-RECORD
+
+    2 #P-LOAN-ACCOUNT-NUMBER         (A12)   /* OUT
+    2 #P-CUSTOMER-ID                 (A10)   /* OUT -> FILE 050 AA
+    2 #P-PRODUCT-CODE                (A6)    /* OUT -> FILE 110 PA
+    2 #P-LOAN-TYPE                   (A4)    /* OUT TERM REVO MORT VEHI PERS EDUC AGRI MSME
+    2 #P-LOAN-STATUS                 (A2)    /* OUT SA DI AC OD NP ST WO RS
+    2 #P-SANCTION-DATE               (P8)    /* OUT YYYYMMDD
+    2 #P-FIRST-DISBURSEMENT-DATE     (P8)    /* OUT Zero if not yet disbursed
+    2 #P-MATURITY-DATE               (P8)    /* OUT Expected final repayment date
+    2 #P-CURRENCY-CODE               (A3)    /* OUT ISO 4217
+
+    * -- Financial Parameters -----------------------------------
+    2 #P-SANCTIONED-AMOUNT           (P15)   /* OUT Original approved amount
+    2 #P-OUTSTANDING-PRINCIPAL       (P15)   /* OUT Current balance (authoritative)
+    2 #P-TOTAL-DISBURSED-AMOUNT      (P15)   /* OUT Cumulative disbursements
+    2 #P-INTEREST-RATE               (P7)    /* OUT Format 5.2 — e.g. 01050 = 10.50%
+    2 #P-RATE-TYPE                   (A1)    /* OUT F=Fixed V=Variable
+    2 #P-EMI-AMOUNT                  (P15)   /* OUT Monthly instalment amount
+    2 #P-TENOR-MONTHS                (N3)    /* OUT Original approved tenor
+    2 #P-REPAYMENT-DAY-OF-MONTH      (N2)    /* OUT Fixed day for EMI debit (1-28)
+    2 #P-NEXT-DUE-DATE               (P8)    /* OUT Next EMI due date YYYYMMDD
+    2 #P-LAST-PAYMENT-DATE           (P8)    /* OUT Date of last received payment
+    2 #P-PENAL-INTEREST-RATE         (P5)    /* OUT Extra rate on overdue (3.2 packed)
+
+    * -- Repayment Counters -------------------------------------
+    2 #P-INSTALLMENTS-TOTAL          (N3)    /* OUT Total instalments in schedule
+    2 #P-INSTALLMENTS-PAID           (N3)    /* OUT Count paid
+    2 #P-INSTALLMENTS-OVERDUE        (N3)    /* OUT Count currently overdue
+
+    * -- Cumulative Paid Amounts --------------------------------
+    2 #P-TOTAL-PRINCIPAL-PAID        (P15)   /* OUT Cumulative principal repaid
+    2 #P-TOTAL-INTEREST-PAID         (P15)   /* OUT Cumulative interest collected
+
+    * -- Overdue Detail -----------------------------------------
+    2 #P-OVERDUE-PRINCIPAL           (P15)   /* OUT Overdue principal component
+    2 #P-OVERDUE-INTEREST            (P15)   /* OUT Overdue interest component
+    2 #P-OVERDUE-CHARGES             (P15)   /* OUT Overdue penal charges
+    2 #P-OVERDUE-DAYS                (N3)    /* OUT Days since oldest unpaid EMI
+
+    * -- NPA Classification -------------------------------------
+    2 #P-NPA-CATEGORY                (A1)    /* OUT N=Normal S=SubStd D=Doubtful L=Loss
+    2 #P-NPA-CLASSIFICATION-DATE     (P8)    /* OUT Zero if performing
+    2 #P-NPA-PROVISION-PERCENT       (P5)    /* OUT Format 3.2
+
+    * -- Linked Accounts and Collateral -------------------------
+    2 #P-LINKED-CASA-ACCOUNT         (A11)   /* OUT -> FILE 100 AA
+    2 #P-COLLATERAL-CODE             (A10)   /* OUT -> FILE 210 CA
+    2 #P-COLLATERAL-VALUE            (P15)   /* OUT Market value at last valuation
+    2 #P-PROCESSING-BRANCH           (A4)    /* OUT -> FILE 035
+    2 #P-LOAN-OFFICER-ID             (A8)    /* OUT User ID
+
+    * -- Restructure Flags -------------------------------------
+    2 #P-RESTRUCTURE-FLAG            (A1)    /* OUT Y/N
+    2 #P-RESTRUCTURE-COUNT           (N3)    /* OUT Times restructured
+
+    * -- Optimistic Lock ----------------------------------------
+    2 #P-RECORD-VERSION              (P5)    /* OUT Must pass back on UPDATE call
+      /* Caller stores this value. When calling LNMOS003 (update),
+      /* caller passes this version back. Subprogram verifies it
+      /* matches FILE 200 current value. Mismatch = response 1004.
+
+  * -- Output: Response ----------------------------------------
+  1 #P-RESPONSE-CODE                 (N4)    /* OUT
+    /* 0000 = Success — record found and returned
+    /* 1010 = Loan account number blank or invalid format
+    /* 1011 = Loan account not found in FILE 200
+    /* 9001 = ADABAS read error — check P-ADABAS-RESPONSE
+    /* 9999 = Unexpected system error
+
+  1 #P-RESPONSE-TEXT                 (A80)   /* OUT Human-readable description
+  1 #P-ADABAS-RESPONSE               (N3)    /* OUT Raw ADABAS response code
+
+END-DEFINE

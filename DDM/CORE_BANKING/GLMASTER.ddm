@@ -1,0 +1,53 @@
+* ============================================================
+* DDM NAME  : MRD-COREBKG-GLMASTER
+* ADABAS    : FILE 105
+* PREDICT   : Library MRDDDMLIB
+* NUCLEUS   : ADANUC
+* OWNER     : CORE BANKING (MRDCBLIB)
+* READERS   : REPORTING (MRDRPLIB) — read-only
+* RECORDS   : ~2,400,000 (GL accounts × periods)
+* BLOCK SZ  : 4096
+* RETENTION : 10 years. Month-end snapshots archived to FILE 600.
+* PURPOSE   : Double-entry general ledger. Every transaction in
+*             FILE 150 has a corresponding debit+credit pair here.
+*             Written by CBGLS001 (subprogram) only.
+*             Never written directly by driver programs.
+* CHANGED   : 1989-11-01  Initial creation
+*             1994-02-10  Migrated to Natural DDM
+*             2008-03-01  Added GK POSTING-USER-ID for SOX compliance
+* ============================================================
+
+DB=105
+
+FIELD=GA, 12, A, DE         /* GL-ACCOUNT-CODE
+                              /* Descriptor. Format: CC-AAAA-PPPP
+                              /* C=CostCentre A=Account P=SubAccount
+
+FIELD=GB, 40, A, NV         /* GL-DESCRIPTION
+
+FIELD=GC,  3, A             /* CURRENCY
+
+FIELD=GD, 18, P, NV         /* DEBIT-BALANCE   (signed packed 16.2)
+
+FIELD=GE, 18, P, NV         /* CREDIT-BALANCE  (signed packed 16.2)
+
+FIELD=GF,  6, A, DE         /* PERIOD-CODE  YYYYMM
+                              /* Descriptor. Used for period-range reads.
+
+FIELD=GG,  6, A, DE,NV      /* COST-CENTRE
+
+FIELD=GH,  6, A, DE,NV      /* PROFIT-CENTRE
+
+FIELD=GI,  8, P, NV         /* LAST-UPDATED-DATE
+
+FIELD=GJ,  6, P, NV         /* LAST-UPDATED-TIME  HHMMSS
+
+FIELD=GK,  8, A, NV         /* POSTING-USER-ID
+                              /* SOX: must be populated on all entries.
+
+* -- SUPERDESCRIPTORS -------------------------------------------
+SUPER=SU-GL-PERIOD, GA(1,12), GF(1,6)
+  /* GL account + period. Primary access for trial balance runs.
+
+SUPER=SU-CC-PERIOD, GG(1,6), GF(1,6)
+  /* Cost centre + period. Used by cost allocation reports.

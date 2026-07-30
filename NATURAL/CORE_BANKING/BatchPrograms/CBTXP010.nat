@@ -1,0 +1,280 @@
+* ============================================================
+* NAME     : CBTXP010
+* TYPE     : Program (Batch — NATBAT execution)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBTXP010
+* JCL JOB  : MRDCD001 (intraday), MRDCE004 (standing orders EOD)
+* PURPOSE  : Batch Transaction Poster. Reads inbound transaction
+*            records from the control file (CMWKF01), posts each
+*            via CBTXS001, and writes a result report to CMPRINT.
+*            Used for: standing order batch, direct debit batch,
+*            bulk payment credits, back-office corrections.
+*            FULL CALL CHAIN (4 levels):
+*              CBTXP010 (L1 — batch driver)
+*                -> CBTXVD01 (L2 — validate each record)
+*                   -> CBACS001 (L3 — account read)
+*                -> CBTXS001 (L2 — post each transaction)
+*                   -> CBACS001 (L3 — re-read with HOLD)
+*                   -> CBGLS001 (L3 — GL entry)
+*                      -> CMUTS007 (L4 — GL audit)
+*                   -> CMUTS007 (L3 — TXN audit)
+* INPUT    : CMWKF01 (MRDBNK.COREBKG.TX.WORK.Dyyyymmdd)
+*            Record format: fixed 350 bytes (see IF-BATCH-TXN layout)
+* OUTPUT   : CMPRINT — batch execution report
+*            CMWKF02 — rejected records output file
+*            FILE 100 — balance updates
+*            FILE 150 — transaction inserts
+*            FILE 105 — GL entries
+*            FILE 010 — audit trail
+* ET FREQ  : ET issued by CBTXS001 per transaction.
+*            CBTXP010 issues no ET itself.
+* CHANGED  : 1994-02-10  Initial creation
+*            2007-09-18  Added reject file CMWKF02 after incident
+*            2015-01-12  Added control total validation
+*            2021-05-20  Added EOD-flag check (prevents intraday run)
+* ============================================================
+DEFINE DATA
+  GLOBAL USING CMDAG001
+  LOCAL  USING CBTXL001
+  LOCAL
+    /* Input record layout — fixed 350 bytes, EBCDIC */
+    1 #INPUT-RECORD             (A350)
+    1 #IR-RECORD-TYPE           (A1)     /* H=Header D=Detail T=Trailer
+    /* Header fields */
+    1 #HDR-BUSINESS-DATE        (A8)
+    1 #HDR-JOB-NAME             (A8)
+    1 #HDR-EXPECTED-COUNT       (N7)
+    1 #HDR-CONTROL-TOTAL        (N15)
+    /* Detail fields */
+    1 #DTL-ACCOUNT-NUMBER       (A11)
+    1 #DTL-TXN-TYPE-CODE        (A4)
+    1 #DTL-DR-CR                (A1)
+    1 #DTL-AMOUNT               (A15)   /* Numeric display format on file
+    1 #DTL-AMOUNT-PACKED        (P15)
+    1 #DTL-CURRENCY             (A3)
+    1 #DTL-VALUE-DATE           (A8)
+    1 #DTL-VALUE-DATE-PACKED    (P8)
+    1 #DTL-NARRATIVE-1          (A40)
+    1 #DTL-NARRATIVE-2          (A40)
+    1 #DTL-REFERENCE            (A20)
+    1 #DTL-PAYMENT-ID           (A20)
+    1 #DTL-LOAN-ACCOUNT         (A12)
+    1 #DTL-SO-REF               (A16)
+    1 #DTL-CHANNEL              (A4)
+    1 #DTL-GL-DR-ACCOUNT        (A12)
+    1 #DTL-GL-CR-ACCOUNT        (A12)
+    1 #DTL-AUTHORISER-ID        (A8)
+    /* Trailer fields */
+    1 #TRL-DETAIL-COUNT         (N7)
+    1 #TRL-CONTROL-TOTAL        (N15)
+    /* Validation subprogram */
+    1 #VD-RESP-CODE             (N4)
+    1 #VD-RESP-TEXT             (A80)
+    1 #VD-ACCT-STATUS           (A2)
+    1 #VD-AVAIL-BAL             (P15)
+    1 #VD-CURR-BAL              (P15)
+    1 #VD-OD-LIMIT              (P15)
+    1 #VD-CCY                   (A3)
+    1 #VD-RECORD-VERSION        (P5)
+    /* Posting PDA */
+    1 #TXN-PDA PARAMETER USING CBTXA001
+    /* Counters and control */
+    1 #RECORDS-READ             (N7)
+    1 #RECORDS-POSTED           (N7)
+    1 #RECORDS-REJECTED         (N7)
+    1 #TOTAL-AMOUNT-POSTED      (P15)
+    1 #TOTAL-AMOUNT-REJECTED    (P15)
+    1 #HEADER-FOUND             (A1)
+    1 #REJECT-RECORD            (A350)
+    1 #REJECT-REASON            (A80)
+    1 #START-TIME               (A6)
+END-DEFINE
+
+MOVE *TIMX(9:6) TO #START-TIME
+MOVE 0          TO #RECORDS-READ
+MOVE 0          TO #RECORDS-POSTED
+MOVE 0          TO #RECORDS-REJECTED
+MOVE 0          TO #TOTAL-AMOUNT-POSTED
+MOVE 0          TO #TOTAL-AMOUNT-REJECTED
+MOVE 'N'        TO #HEADER-FOUND
+
+WRITE TITLE 'MERIDIAN BANK - BATCH TRANSACTION POSTER - CBTXP010'
+WRITE '  RUN DATE  : ' #SYS-BUSINESS-DATE
+WRITE '  RUN TIME  : ' #START-TIME
+WRITE '  JOB NAME  : ' #SYS-TERMINAL-ID
+WRITE '  ENVIRONMENT: ' #SYS-ENVIRONMENT
+WRITE ' '
+
+* ══════════════════════════════════════════════════════════
+* Read input file loop
+* ══════════════════════════════════════════════════════════
+READ WORK FILE 1 #INPUT-RECORD
+
+  MOVE #INPUT-RECORD(1:1)  TO #IR-RECORD-TYPE
+  COMPUTE #RECORDS-READ = #RECORDS-READ + 1
+
+  * ── Header record ──────────────────────────────────────
+  IF #IR-RECORD-TYPE = 'H'
+    MOVE 'Y' TO #HEADER-FOUND
+    MOVE #INPUT-RECORD(2:8)  TO #HDR-BUSINESS-DATE
+    MOVE #INPUT-RECORD(10:8) TO #HDR-JOB-NAME
+    MOVE #INPUT-RECORD(18:7) TO #HDR-EXPECTED-COUNT
+    MOVE #INPUT-RECORD(25:15) TO #HDR-CONTROL-TOTAL
+    WRITE '  INPUT FILE BUSINESS DATE: ' #HDR-BUSINESS-DATE
+    WRITE '  EXPECTED RECORDS        : ' #HDR-EXPECTED-COUNT
+    WRITE '  EXPECTED CONTROL TOTAL  : ' #HDR-CONTROL-TOTAL
+    WRITE ' '
+    /* Validate business date matches current */
+    IF #HDR-BUSINESS-DATE NE EDIT(#SYS-BUSINESS-DATE,'99999999')
+      WRITE '** FATAL: INPUT FILE DATE MISMATCH - ABORTING **'
+      WRITE '   FILE DATE   : ' #HDR-BUSINESS-DATE
+      WRITE '   SYSTEM DATE : ' #SYS-BUSINESS-DATE
+      STOP
+    END-IF
+    ESCAPE TOP
+  END-IF
+
+  * ── Trailer record — control total check ───────────────
+  IF #IR-RECORD-TYPE = 'T'
+    MOVE #INPUT-RECORD(2:7)  TO #TRL-DETAIL-COUNT
+    MOVE #INPUT-RECORD(9:15) TO #TRL-CONTROL-TOTAL
+    WRITE ' '
+    WRITE '══════════════════════════════════════════════'
+    WRITE '  TRAILER VALIDATION'
+    WRITE '  TRAILER EXPECTED COUNT  : ' #TRL-DETAIL-COUNT
+    WRITE '  ACTUAL DETAIL RECORDS   : ' #RECORDS-READ - 2  /* Excl H and T
+    WRITE '  TRAILER CONTROL TOTAL   : ' #TRL-CONTROL-TOTAL
+    WRITE '  ACTUAL AMOUNT POSTED    : ' #TOTAL-AMOUNT-POSTED
+    IF #TRL-DETAIL-COUNT NE #RECORDS-READ - 2
+      WRITE '** WARNING: RECORD COUNT MISMATCH **'
+    END-IF
+    ESCAPE TOP
+  END-IF
+
+  * ── Detail record — validate and post ─────────────────
+  IF #IR-RECORD-TYPE NE 'D'
+    ESCAPE TOP
+  END-IF
+
+  /* Parse detail record fields */
+  MOVE #INPUT-RECORD(2:11)   TO #DTL-ACCOUNT-NUMBER
+  MOVE #INPUT-RECORD(13:4)   TO #DTL-TXN-TYPE-CODE
+  MOVE #INPUT-RECORD(17:1)   TO #DTL-DR-CR
+  MOVE #INPUT-RECORD(18:15)  TO #DTL-AMOUNT          /* Display format
+  MOVE #INPUT-RECORD(33:3)   TO #DTL-CURRENCY
+  MOVE #INPUT-RECORD(36:8)   TO #DTL-VALUE-DATE
+  MOVE #INPUT-RECORD(44:40)  TO #DTL-NARRATIVE-1
+  MOVE #INPUT-RECORD(84:40)  TO #DTL-NARRATIVE-2
+  MOVE #INPUT-RECORD(124:20) TO #DTL-REFERENCE
+  MOVE #INPUT-RECORD(144:20) TO #DTL-PAYMENT-ID
+  MOVE #INPUT-RECORD(164:12) TO #DTL-LOAN-ACCOUNT
+  MOVE #INPUT-RECORD(176:16) TO #DTL-SO-REF
+  MOVE #INPUT-RECORD(192:4)  TO #DTL-CHANNEL
+  MOVE #INPUT-RECORD(196:12) TO #DTL-GL-DR-ACCOUNT
+  MOVE #INPUT-RECORD(208:12) TO #DTL-GL-CR-ACCOUNT
+  MOVE #INPUT-RECORD(220:8)  TO #DTL-AUTHORISER-ID
+
+  /* Convert display to packed */
+  MOVE #DTL-AMOUNT    TO #DTL-AMOUNT-PACKED
+  MOVE #DTL-VALUE-DATE TO #DTL-VALUE-DATE-PACKED
+
+  * ── Step 1: Validate via CBTXVD01 ─────────────────────
+  * CALL CHAIN: CBTXP010(L1) -> CBTXVD01(L2) -> CBACS001(L3)
+  CALLNAT 'CBTXVD01'
+    #DTL-ACCOUNT-NUMBER
+    #DTL-DR-CR
+    #DTL-AMOUNT-PACKED
+    #DTL-CURRENCY
+    #DTL-VALUE-DATE-PACKED
+    #DTL-TXN-TYPE-CODE
+    'N'                              /* No OD override in batch
+    #VD-RESP-CODE
+    #VD-RESP-TEXT
+    #VD-ACCT-STATUS
+    #VD-AVAIL-BAL
+    #VD-CURR-BAL
+    #VD-OD-LIMIT
+    #VD-CCY
+    #VD-RECORD-VERSION
+
+  IF #VD-RESP-CODE NE 0
+    COMPUTE #RECORDS-REJECTED = #RECORDS-REJECTED + 1
+    COMPUTE #TOTAL-AMOUNT-REJECTED = #TOTAL-AMOUNT-REJECTED + #DTL-AMOUNT-PACKED
+    MOVE #INPUT-RECORD TO #REJECT-RECORD
+    MOVE #VD-RESP-TEXT TO #REJECT-REASON
+    /* Write to reject file CMWKF02 */
+    WRITE WORK FILE 2 #REJECT-RECORD
+    WRITE '  REJECT: ACCT=' #DTL-ACCOUNT-NUMBER
+          ' TYPE=' #DTL-TXN-TYPE-CODE
+          ' AMT=' #DTL-AMOUNT-PACKED
+          ' REASON=' #REJECT-REASON
+    ESCAPE TOP
+  END-IF
+
+  * ── Step 2: Post via CBTXS001 ─────────────────────────
+  * CALL CHAIN: CBTXP010(L1) -> CBTXS001(L2) -> [L3,L4 chain]
+  MOVE #DTL-ACCOUNT-NUMBER  TO #TXN-PDA.#P-TXN-INPUT.#P-ACCOUNT-NUMBER
+  MOVE #DTL-TXN-TYPE-CODE   TO #TXN-PDA.#P-TXN-INPUT.#P-TRANSACTION-TYPE-CODE
+  MOVE #DTL-DR-CR           TO #TXN-PDA.#P-TXN-INPUT.#P-DR-CR-INDICATOR
+  MOVE #DTL-AMOUNT-PACKED   TO #TXN-PDA.#P-TXN-INPUT.#P-AMOUNT
+  MOVE #DTL-CURRENCY        TO #TXN-PDA.#P-TXN-INPUT.#P-CURRENCY-CODE
+  MOVE #DTL-VALUE-DATE-PACKED TO #TXN-PDA.#P-TXN-INPUT.#P-VALUE-DATE
+  MOVE #DTL-NARRATIVE-1     TO #TXN-PDA.#P-TXN-INPUT.#P-NARRATIVE-LINE-1
+  MOVE #DTL-NARRATIVE-2     TO #TXN-PDA.#P-TXN-INPUT.#P-NARRATIVE-LINE-2
+  MOVE #DTL-REFERENCE       TO #TXN-PDA.#P-TXN-INPUT.#P-REFERENCE-NUMBER
+  MOVE #DTL-PAYMENT-ID      TO #TXN-PDA.#P-TXN-INPUT.#P-PAYMENT-ID
+  MOVE #DTL-LOAN-ACCOUNT    TO #TXN-PDA.#P-TXN-INPUT.#P-LOAN-ACCOUNT-NUMBER
+  MOVE #DTL-SO-REF          TO #TXN-PDA.#P-TXN-INPUT.#P-STANDING-ORDER-REF
+  MOVE #DTL-CHANNEL         TO #TXN-PDA.#P-TXN-INPUT.#P-CHANNEL-CODE
+  MOVE #DTL-AUTHORISER-ID   TO #TXN-PDA.#P-TXN-INPUT.#P-AUTHORISER-ID
+  MOVE #DTL-GL-DR-ACCOUNT   TO #TXN-PDA.#P-TXN-INPUT.#P-GL-ACCOUNT-DR
+  MOVE #DTL-GL-CR-ACCOUNT   TO #TXN-PDA.#P-TXN-INPUT.#P-GL-ACCOUNT-CR
+  MOVE 'N'                  TO #TXN-PDA.#P-TXN-INPUT.#P-OVERRIDE-LIMIT
+  MOVE #VD-RECORD-VERSION   TO #TXN-PDA.#P-TXN-INPUT.#P-RECORD-VERSION
+
+  CALLNAT 'CBTXS001'
+    #TXN-PDA.#P-TXN-INPUT
+    #TXN-PDA.#P-TXN-OUTPUT
+    #TXN-PDA.#P-RESPONSE-CODE
+    #TXN-PDA.#P-RESPONSE-TEXT
+    #TXN-PDA.#P-ADABAS-RESPONSE
+
+  IF #TXN-PDA.#P-RESPONSE-CODE NE 0
+    COMPUTE #RECORDS-REJECTED = #RECORDS-REJECTED + 1
+    COMPUTE #TOTAL-AMOUNT-REJECTED = #TOTAL-AMOUNT-REJECTED + #DTL-AMOUNT-PACKED
+    MOVE #INPUT-RECORD TO #REJECT-RECORD
+    WRITE WORK FILE 2 #REJECT-RECORD
+    WRITE '  REJECT (POST): ACCT=' #DTL-ACCOUNT-NUMBER
+          ' TXN-ID=N/A'
+          ' REASON=' #TXN-PDA.#P-RESPONSE-TEXT
+    ESCAPE TOP
+  END-IF
+
+  COMPUTE #RECORDS-POSTED = #RECORDS-POSTED + 1
+  COMPUTE #TOTAL-AMOUNT-POSTED = #TOTAL-AMOUNT-POSTED + #DTL-AMOUNT-PACKED
+
+  /* Progress write every 500 records */
+  IF #RECORDS-POSTED / 500 * 500 = #RECORDS-POSTED
+    WRITE '  PROGRESS: POSTED=' #RECORDS-POSTED ' REJECTED=' #RECORDS-REJECTED
+  END-IF
+
+END-READ
+
+* ── Final summary report ────────────────────────────────────
+WRITE ' '
+WRITE '══════════════════════════════════════════════════════'
+WRITE '  CBTXP010 BATCH TRANSACTION POSTER - FINAL SUMMARY'
+WRITE '══════════════════════════════════════════════════════'
+WRITE '  BUSINESS DATE    : ' #SYS-BUSINESS-DATE
+WRITE '  RECORDS READ     : ' #RECORDS-READ
+WRITE '  RECORDS POSTED   : ' #RECORDS-POSTED
+WRITE '  RECORDS REJECTED : ' #RECORDS-REJECTED
+WRITE '  AMOUNT POSTED    : ' #TOTAL-AMOUNT-POSTED
+WRITE '  AMOUNT REJECTED  : ' #TOTAL-AMOUNT-REJECTED
+WRITE '  END TIME         : ' *TIMX(9:6)
+
+IF #RECORDS-REJECTED > 0
+  WRITE '** ATTENTION: ' #RECORDS-REJECTED ' RECORDS REJECTED - CHECK CMWKF02 **'
+END-IF
+
+END

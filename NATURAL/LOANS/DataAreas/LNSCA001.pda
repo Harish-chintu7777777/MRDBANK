@@ -1,0 +1,66 @@
+* ============================================================
+* NAME     : LNSCA001
+* TYPE     : Parameter Data Area (PDA)
+* LIBRARY  : MRDLNLIB
+* OBJECT   : LNSCA001
+* PURPOSE  : CALLNAT interface contract for LNSCS001 (Loan Schedule
+*            Read Subprogram). Returns the full amortisation schedule
+*            for a loan from FILE 205, or a single instalment by
+*            instalment number.
+*            Supports two read modes:
+*              A = All instalments for a loan (up to 360 occurrences)
+*              S = Single instalment by instalment number
+* PREDICT  : Registered under MRDDDMLIB
+* USED BY  : LNIQP001  (loan inquiry online — schedule display)
+*            LNIAP010  (accrual batch — find next due instalment)
+*            LNRPS001  (repayment — find oldest unpaid instalment)
+*            LNNPAP01  (NPA batch — count overdue instalments)
+*            RPDLP040  (reporting — loan statement print)
+* CHANGED  : 1994-06-15  Initial creation.
+*            2012-03-01  Added P-PENAL-AMOUNT to schedule row output.
+* ============================================================
+DEFINE DATA PARAMETER
+
+  * -- Input Parameters -----------------------------------------
+  1 #P-LOAN-ACCOUNT-NUMBER           (A12)   /* IN  Loan to read schedule for
+  1 #P-READ-MODE                     (A1)    /* IN  A=All  S=Single-instalment
+  1 #P-INSTALLMENT-NUMBER            (N3)    /* IN  Used when P-READ-MODE = S
+
+  * -- Output: Schedule Row Array (max 360 instalments) ---------
+  1 #P-SCHEDULE-COUNT                (N3)    /* OUT Actual number of rows returned
+  1 #P-SCHEDULE (1:360)
+    2 #P-INST-NUMBER                 (N3)    /* OUT Instalment sequence number
+    2 #P-DUE-DATE                    (P8)    /* OUT YYYYMMDD
+    2 #P-EMI-AMOUNT                  (P15)   /* OUT Total instalment
+    2 #P-PRINCIPAL-COMPONENT         (P15)   /* OUT Principal portion
+    2 #P-INTEREST-COMPONENT          (P15)   /* OUT Interest portion
+    2 #P-OPENING-BALANCE             (P15)   /* OUT Loan balance at start of period
+    2 #P-CLOSING-BALANCE             (P15)   /* OUT Loan balance after this EMI
+    2 #P-PAYMENT-DATE                (P8)    /* OUT Actual payment date (zero=unpaid)
+    2 #P-PAID-AMOUNT                 (P15)   /* OUT Amount actually paid
+    2 #P-PAID-PRINCIPAL              (P15)   /* OUT Principal portion of payment
+    2 #P-PAID-INTEREST               (P15)   /* OUT Interest portion of payment
+    2 #P-STATUS                      (A2)    /* OUT PE PD OD PP WV
+    2 #P-DAYS-OVERDUE                (N3)    /* OUT Zero if not overdue
+    2 #P-PENAL-AMOUNT                (P15)   /* OUT Penal charge for this instalment
+    2 #P-PAYMENT-TRANSACTION-ID      (A20)   /* OUT -> FILE 150 AA (blank if unpaid)
+
+  * -- Output: Summary (populated for Read-mode A) -------------
+  1 #P-TOTAL-EMI                     (P15)   /* OUT Sum of all EMI amounts
+  1 #P-TOTAL-PRINCIPAL               (P15)   /* OUT Sum of all principal components
+  1 #P-TOTAL-INTEREST                (P15)   /* OUT Sum of all interest components
+  1 #P-TOTAL-PAID                    (P15)   /* OUT Total amount paid to date
+  1 #P-OVERDUE-COUNT                 (N3)    /* OUT Count of OD status rows
+
+  * -- Output: Response ----------------------------------------
+  1 #P-RESPONSE-CODE                 (N4)    /* OUT
+    /* 0000 = Success
+    /* 1010 = Loan account number blank
+    /* 1011 = Loan account not found in FILE 205
+    /* 1012 = Instalment number not found (mode S only)
+    /* 9001 = ADABAS read error on FILE 205
+
+  1 #P-RESPONSE-TEXT                 (A80)   /* OUT
+  1 #P-ADABAS-RESPONSE               (N3)    /* OUT
+
+END-DEFINE

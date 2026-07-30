@@ -1,0 +1,172 @@
+* ============================================================
+* DDM NAME  : MRD-COREBKG-ACCTMSTR
+* ADABAS    : FILE 100
+* PREDICT   : Library MRDDDMLIB
+* NUCLEUS   : ADANUC (DBID configured per LPAR via NATPARM)
+* OWNER     : CORE BANKING (MRDCBLIB) — write access only
+* READERS   : ALL domains (read-only via NATSEC profile)
+* RECORDS   : ~18,400,000 (active + dormant + recently closed)
+* BLOCK SZ  : 6144 bytes
+* COMPRESS  : YES (default ADABAS compression)
+* RETENTION : Permanent. Status CL=Closed only — never physically deleted.
+* CHANGED   : 1989-11-01  File 100 created (original COBOL system)
+*             1994-02-10  Migrated to Natural/ADABAS. DDM created.
+*             2003-11-14  Added BM OFAC-FLAG after compliance mandate
+*             2015-06-01  Added BJ LINKED-LOAN-ACCOUNT
+*             2020-03-19  Added BC-BE FREEZE fields
+*             2022-09-08  Added FF RECORD-VERSION for optimistic lock
+* ============================================================
+*
+* FIELD DEFINITION TABLE (FDT)
+* Fmt: A=Alpha P=Packed N=Numeric B=Binary
+* Opt: D=Descriptor U=Unique SD=Subdesc SU=Superdesc
+*      MU=MultiValue PE=PeriodicGroup NC=NonCompressed
+*      NV=NullValue FI=FixedLength
+* ============================================================
+
+DB=100
+
+FIELD=AA, 11, A, DE         /* ACCOUNT-NUMBER
+                              /* Unique descriptor. Format BBBBTTTNNNNC.
+                              /* B=Branch(4) T=Type(3) N=Seq(4) C=Check.
+                              /* Luhn mod-10 validated by CBACVD01.
+
+FIELD=AB, 10, A, DE         /* CUSTOMER-ID
+                              /* Descriptor. -> FILE 050 AA.
+                              /* Referential integrity enforced by Natural.
+
+FIELD=AC,  6, A, DE         /* PRODUCT-CODE
+                              /* -> FILE 110 PA (Product Master).
+
+FIELD=AD,  4, A, DE         /* ACCOUNT-TYPE
+                              /* CURR SAVG FIXD CALL FCCY ODRFT
+
+FIELD=AE,  2, A, DE,FI      /* ACCOUNT-STATUS
+                              /* AC=Active  DM=Dormant  CL=Closed
+                              /* FR=Frozen  LN=Lien     SZ=Seized
+                              /* FI: critical for batch range reads.
+
+FIELD=AF,  8, P, DE         /* DATE-OPENED
+                              /* YYYYMMDD packed. Descriptor for cohorts.
+
+FIELD=AG,  8, P, NV         /* DATE-CLOSED
+                              /* Zero (null-suppressed) if still open.
+
+FIELD=AH,  3, A             /* CURRENCY-CODE
+                              /* ISO 4217 alpha-3. e.g. USD GBP EUR INR
+
+FIELD=AI, 15, P, NV         /* CURRENT-BALANCE
+                              /* Signed packed 13.2. Can be negative.
+
+FIELD=AJ, 15, P, NV         /* AVAILABLE-BALANCE
+                              /* = Current - Lien - Uncleared.
+
+FIELD=AK, 15, P, NV         /* CLEARED-BALANCE
+
+FIELD=AL, 15, P, NV         /* UNCLEARED-BALANCE
+                              /* Cheques deposited not yet cleared.
+
+FIELD=AM, 15, P, NV         /* OVERDRAFT-LIMIT
+                              /* Zero if no OD facility.
+
+FIELD=AN,  8, P, NV         /* OVERDRAFT-EXPIRY-DATE
+
+FIELD=AO, 15, P, NV         /* LIEN-AMOUNT
+
+FIELD=AP,  6, A, DE,NV      /* INTEREST-RATE-CODE
+                              /* -> FILE 115.
+
+FIELD=AQ,  6, A, NV         /* CHARGE-SCHEDULE-CODE
+                              /* -> FILE 120.
+
+FIELD=AR,  2, A, NV         /* STATEMENT-CYCLE
+                              /* MN QT HY AN
+
+FIELD=AS,  4, A, NV         /* STATEMENT-DELIVERY
+                              /* EPPR PAPR BOTH NONE
+
+FIELD=AT,  4, A, DE         /* BRANCH-CODE
+                              /* -> FILE 035.
+
+FIELD=AU,  8, A, DE,NV      /* RELATIONSHIP-MGR-ID
+
+FIELD=AV,  8, P, DE,NV      /* LAST-TRANSACTION-DATE
+                              /* Descriptor: dormancy detection (CBACP010).
+
+FIELD=AW,  8, P, NV         /* LAST-STATEMENT-DATE
+
+FIELD=AX, 15, P, NV         /* ACCRUED-INTEREST-DR
+
+FIELD=AY, 15, P, NV         /* ACCRUED-INTEREST-CR
+
+FIELD=AZ, 15, P, NV         /* ACCRUED-CHARGES
+
+FIELD=BA,  8, P, NV         /* INTEREST-DUE-DATE
+
+FIELD=BB,  8, P, NV         /* CHARGE-DUE-DATE
+
+FIELD=BC,  4, A, DE,NV      /* FREEZE-REASON-CODE
+                              /* CORT DETH FRDT SANC
+
+FIELD=BD,  8, P, NV         /* FREEZE-DATE
+
+FIELD=BE,  8, A, NV         /* FREEZE-AUTHORISER
+
+FIELD=BF,  8, P, NV         /* DORMANCY-DATE
+
+FIELD=BG,  4, A, NV         /* DORMANCY-REASON
+
+FIELD=BH,  1, A, DE         /* JOINT-ACCOUNT-FLAG  Y/N
+
+FIELD=BI,  4, A, DE,NV      /* MANDATE-TYPE  SOLE EORE BOTH
+
+FIELD=BJ, 12, A, DE,NV      /* LINKED-LOAN-ACCOUNT
+                              /* -> FILE 200 LA.
+
+FIELD=BK, 19, A, NV         /* LINKED-CARD-NUMBER  (hash+last4)
+
+FIELD=BL,  2, A, NV         /* RISK-RATING-OVERRIDE
+
+FIELD=BM,  1, A, DE         /* OFAC-FLAG  Y/N
+                              /* Written by FRAUD domain via CBACS006.
+                              /* Never written directly by CB programs.
+
+FIELD=BN,  8, P, NV         /* OFAC-LAST-CHECKED
+
+FIELD=BO,  1, A, NV         /* TAX-WITHHOLDING-FLAG  Y/N
+
+FIELD=BP,  5, P, NV         /* TDS-RATE  (3.2 packed)
+
+* -- PERIODIC GROUP: AUTHORISED SIGNATORIES (max 4) ----------
+FIELD=SA, PE(4)             /* Begin periodic group
+FIELD=SB, 10, A, NV         /* SIGNATORY-CUSTOMER-ID -> FILE 050
+FIELD=SC, 80, A, NV         /* SIGNATORY-NAME
+FIELD=SD,  4, A, NV         /* SIGNATORY-TYPE  PRIM JONT ATNY GURD
+FIELD=SE,  8, P, NV         /* SIGNATORY-FROM-DATE
+FIELD=SF,  8, P, NV         /* SIGNATORY-TO-DATE
+FIELD=SZ, PE                /* End periodic group
+
+* -- AUDIT FIELDS (NC = non-compressed for fast retrieval) ---
+FIELD=FA,  8, A, NC         /* CREATED-BY-USER-ID
+FIELD=FB, 26, A, NC         /* CREATED-TIMESTAMP  ISO8601
+FIELD=FC,  8, A, NC         /* LAST-UPDATED-BY
+FIELD=FD, 26, A, NC         /* LAST-UPDATED-TIMESTAMP
+FIELD=FE,  8, A, NC         /* LAST-UPDATED-PROGRAM
+FIELD=FF,  5, P, NC         /* RECORD-VERSION  (optimistic lock counter)
+FIELD=FG,  4, A, NC         /* SYSTEM-OF-ORIGIN  NATV MIGR BULK
+
+* -- SUPERDESCRIPTORS -------------------------------------------
+SUPER=SU-CUST-TYPE,  AB(1,10), AD(1,4)
+  /* All account types per customer. Used by customer portfolio queries.
+
+SUPER=SU-CUST-STATUS, AB(1,10), AE(1,2)
+  /* Active accounts per customer. Used by CBICP001 interest accrual.
+
+SUPER=SU-BRANCH-TYPE, AT(1,4), AD(1,4)
+  /* Branch portfolio by product. Used by RPDLP013 branch report.
+
+SUPER=SU-STATUS-DATE, AE(1,2), AF(1,8)
+  /* Status + open date. Used for cohort and vintage analysis.
+
+SUPER=SU-RM-STATUS,  AU(1,8), AE(1,2)
+  /* RM book by status. Used by relationship manager reports.

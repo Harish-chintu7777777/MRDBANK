@@ -1,0 +1,128 @@
+* ============================================================
+* NAME     : CBTXA001
+* TYPE     : Parameter Data Area (PDA)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBTXA001
+* PURPOSE  : CALLNAT interface contract for CBTXS001 (Transaction
+*            Post Subprogram). The most-called subprogram: ~6.8M/day.
+*            Caller provides transaction details; subprogram updates
+*            FILE 100 balance, STOREs FILE 150, calls CBGLS001 for
+*            GL, and CMUTS007 for audit — all within ONE ET boundary.
+* PREDICT  : Registered under MRDDDMLIB
+* USED BY  : CBTXP001 (online teller), CBTXP010 (batch poster),
+*            CBSOP011 (standing orders), CBDDP001 (direct debit),
+*            CBICP002 (interest posting), CBICP004 (charge posting),
+*            LNRPP011 (loan repayment — cross-domain CALLNAT)
+* CHANGED  : 1994-02-10  Initial creation
+*            2008-07-22  Added P-BALANCE-AFTER warning comment
+*            2016-05-11  Added P-LOAN-ACCOUNT-NUMBER for repayments
+*            2019-03-01  Added P-OVERRIDE-LIMIT for authorised OD
+* WARNING  : P-BALANCE-AFTER is returned for display and logging only.
+*            Callers must NOT persist or reuse this value as the
+*            authoritative balance. Read FILE 100 for authoritative
+*            balance. See also CBTXL001 CAUTION comment.
+* ============================================================
+DEFINE DATA PARAMETER
+
+  * -- Input: Transaction Details (all IN) ----------------------
+  1 #P-TXN-INPUT
+
+    2 #P-ACCOUNT-NUMBER             (A11)
+      /* Target account. Must exist and be AC status.
+      /* CBACS001 called internally with H lock before update.
+
+    2 #P-TRANSACTION-TYPE-CODE      (A4)
+      /* From type registry in FILE 015. Examples:
+      /* DPSC=CashDeposit WDSC=CashWithdrawal DPNF=NEFT-Credit
+      /* CNIN=InterestCredit CNCH=ChargeDebit CNRV=Reversal
+
+    2 #P-DR-CR-INDICATOR            (A1)
+      /* D=Debit  C=Credit. MANDATORY. Subprogram rejects if blank.
+      /* Must match the economic direction of the transaction type.
+
+    2 #P-AMOUNT                     (P15)
+      /* Transaction amount. ALWAYS POSITIVE.
+      /* Sign is carried in P-DR-CR-INDICATOR above.
+
+    2 #P-CURRENCY-CODE              (A3)
+      /* Transaction currency. If differs from account currency,
+      /* FX conversion applied using FILE 025 rate at business date.
+
+    2 #P-VALUE-DATE                 (P8)
+      /* YYYYMMDD. For same-day: = #SYS-BUSINESS-DATE.
+      /* Back-value: any date within current interest period.
+      /* Future value: rejected (response 1005).
+
+    2 #P-NARRATIVE-LINE-1           (A40)
+      /* First line of narrative. Populated on FILE 150.
+    2 #P-NARRATIVE-LINE-2           (A40)
+      /* Second line. Blank if single-line. Optional.
+
+    2 #P-REFERENCE-NUMBER           (A20)
+      /* Cheque number, payment reference, or batch identifier.
+      /* Blank for cash transactions.
+
+    2 #P-PAYMENT-ID                 (A20)
+      /* FILE 300 PA cross-ref. Blank if not a payment transaction.
+    2 #P-LOAN-ACCOUNT-NUMBER        (A12)
+      /* FILE 200 LA cross-ref. Blank if not a loan repayment.
+    2 #P-STANDING-ORDER-REF         (A16)
+      /* FILE 125 cross-ref. Blank if not a standing order.
+
+    2 #P-CHANNEL-CODE               (A4)
+      /* TELL ATM MOB INTB BRNC RTGS NEFT SWFT STDO DDBT
+
+    2 #P-TELLER-ID                  (A8)
+      /* Teller user ID. Blank for batch and system-generated postings.
+    2 #P-AUTHORISER-ID              (A8)
+      /* Dual-control authoriser ID. Blank if not required.
+
+    2 #P-GL-ACCOUNT-DR              (A12)
+      /* GL account code to debit. -> FILE 105 GA.
+    2 #P-GL-ACCOUNT-CR              (A12)
+      /* GL account code to credit. -> FILE 105 GA.
+      /* Subprogram verifies both exist before posting.
+
+    2 #P-OVERRIDE-LIMIT             (A1)
+      /* Y = Allow overdraft beyond authorised limit (requires AUTHID).
+      /* N = Reject if available balance insufficient.
+      /* Caller must have RACF authority MRDBNK.OD.OVERRIDE to use Y.
+
+    2 #P-RECORD-VERSION             (P5)
+      /* Account record version from prior CBACS001 read.
+      /* Passed to subprogram for optimistic lock verification.
+      /* Mismatch returns 1004 and issues BT before returning.
+
+  * -- Output ---------------------------------------------------
+  1 #P-TXN-OUTPUT
+
+    2 #P-TRANSACTION-ID             (A20)   /* OUT System-generated ID
+      /* Format: YYYYMMDDHHMMSS + 6-digit sequence (CBTXS001 generates).
+    2 #P-BALANCE-AFTER              (P15)   /* OUT Display-only snapshot
+      /* See WARNING above. Never persist or re-derive from this.
+    2 #P-GL-ENTRY-REFERENCE         (A12)   /* OUT -> FILE 105 GA
+    2 #P-CHARGE-AMOUNT              (P15)   /* OUT If charge was applied
+    2 #P-TAX-AMOUNT                 (P15)   /* OUT If TDS was deducted
+    2 #P-EXCHANGE-RATE-USED         (P12)   /* OUT FX rate applied
+
+  * -- Response ------------------------------------------------
+  1 #P-RESPONSE-CODE                (N4)    /* OUT
+    /* 0000 = Success — transaction posted, GL updated, audit written
+    /* 1001 = Insufficient funds (available balance < amount)
+    /* 1002 = Account frozen — cannot post
+    /* 1003 = Overdraft limit exceeded
+    /* 1004 = Record version conflict — re-read and retry
+    /* 1005 = Future value date not permitted
+    /* 1006 = Account closed — cannot post
+    /* 1007 = Account dormant — use CBTXP001 with manager override
+    /* 1008 = GL account not found
+    /* 1009 = Transaction type code invalid
+    /* 9001 = ADABAS error on FILE 100 update
+    /* 9002 = ADABAS error on FILE 150 store
+    /* 9003 = ADABAS error on FILE 105 GL store
+    /* 9999 = Unexpected system error — BT issued, no posting
+
+  1 #P-RESPONSE-TEXT                (A80)   /* OUT Description
+  1 #P-ADABAS-RESPONSE              (N3)    /* OUT Raw ADABAS code
+
+END-DEFINE

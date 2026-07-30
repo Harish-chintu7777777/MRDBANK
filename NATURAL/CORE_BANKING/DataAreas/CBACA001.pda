@@ -1,0 +1,93 @@
+* ============================================================
+* NAME     : CBACA001
+* TYPE     : Parameter Data Area (PDA)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBACA001
+* PURPOSE  : CALLNAT interface contract for CBACS001 (Account Read
+*            Subprogram). Callers in any domain use this PDA.
+*            Caller sets IN fields; subprogram returns OUT fields.
+* PREDICT  : Registered under MRDDDMLIB
+* USED BY  : CBACP001, CBACP002, CBTXS001, CBTXVD01, LNMOS001,
+*            PYINR001, FDSCP010  (34 programs across 4 domains)
+* CHANGED  : 1994-02-10  Initial creation
+*            2003-11-14  Added P-LOCK-MODE after balance incident
+*            2020-03-19  Added P-FREEZE fields to output
+*            2022-01-10  Added P-RECORD-VERSION for optimistic lock
+* CAUTION  : Changes to this PDA require recompile of ALL 34 callers.
+*            Raise CAB change request before any modification.
+*            Add new output fields at END only to avoid layout shift.
+* ============================================================
+DEFINE DATA PARAMETER
+
+  * -- Input Parameters -----------------------------------------
+  1 #P-ACCOUNT-NUMBER               (A11)   /* IN
+    /* Account number to read. Must be Luhn-valid (CBACVD01 validates).
+    /* Space = invalid. Subprogram returns response 1010 if blank.
+
+  1 #P-LOCK-MODE                    (A1)    /* IN
+    /* R = Read-only (no HOLD placed on ADABAS record).
+    /* H = Hold    (places ADABAS HOLD for subsequent UPDATE).
+    /* H must be used when caller intends to call CBACS003 (update).
+    /* HOLD is released on ET or BT. Do not hold for >90 seconds
+    /* (ADABAS nucleus timeout = 90s, then auto-released).
+
+  * -- Output: Account Record -----------------------------------
+  1 #P-ACCOUNT-RECORD
+
+    2 #P-ACCOUNT-NUMBER             (A11)   /* OUT
+    2 #P-CUSTOMER-ID                (A10)   /* OUT -> FILE 050 AA
+    2 #P-PRODUCT-CODE               (A6)    /* OUT -> FILE 110 PA
+    2 #P-ACCOUNT-TYPE               (A4)    /* OUT CURR SAVG FIXD CALL FCCY
+    2 #P-ACCOUNT-STATUS             (A2)    /* OUT AC DM CL FR LN SZ
+    2 #P-DATE-OPENED                (P8)    /* OUT YYYYMMDD
+    2 #P-DATE-CLOSED                (P8)    /* OUT Zero if open
+    2 #P-CURRENCY-CODE              (A3)    /* OUT ISO 4217
+
+    * -- Balances (SIGNED PACKED 13.2) -------------------------
+    2 #P-CURRENT-BALANCE            (P15)   /* OUT Total book balance
+    2 #P-AVAILABLE-BALANCE          (P15)   /* OUT Available for use
+    2 #P-CLEARED-BALANCE            (P15)   /* OUT Cleared funds only
+    2 #P-UNCLEARED-BALANCE          (P15)   /* OUT Cheques not cleared
+    2 #P-OVERDRAFT-LIMIT            (P15)   /* OUT Zero if no facility
+    2 #P-LIEN-AMOUNT                (P15)   /* OUT Legal hold amount
+
+    * -- Accruals ----------------------------------------------
+    2 #P-ACCRUED-INTEREST-DR        (P15)   /* OUT Interest owed by customer
+    2 #P-ACCRUED-INTEREST-CR        (P15)   /* OUT Interest owed to customer
+    2 #P-ACCRUED-CHARGES            (P15)   /* OUT Charges not yet posted
+
+    * -- Rate References ----------------------------------------
+    2 #P-INTEREST-RATE-CODE         (A6)    /* OUT -> FILE 115
+    2 #P-CHARGE-SCHEDULE-CODE       (A6)    /* OUT -> FILE 120
+    2 #P-BRANCH-CODE                (A4)    /* OUT -> FILE 035
+    2 #P-RELATIONSHIP-MGR-ID        (A8)    /* OUT RM user ID
+
+    * -- Status Dates -------------------------------------------
+    2 #P-LAST-TRANSACTION-DATE      (P8)    /* OUT Date of last posting
+    2 #P-DORMANCY-DATE              (P8)    /* OUT Zero if not dormant
+    2 #P-FREEZE-REASON-CODE         (A4)    /* OUT Blank if not frozen
+    2 #P-FREEZE-DATE                (P8)    /* OUT Zero if not frozen
+
+    * -- Compliance --------------------------------------------
+    2 #P-OFAC-FLAG                  (A1)    /* OUT Y/N
+    2 #P-TAX-WITHHOLDING-FLAG       (A1)    /* OUT Y/N
+    2 #P-TDS-RATE                   (P5)    /* OUT TDS percentage
+
+    * -- Optimistic Lock ----------------------------------------
+    2 #P-RECORD-VERSION             (P5)    /* OUT Must pass back on UPDATE
+      /* Caller stores this value. When calling CBACS003 (update),
+      /* caller passes this version back. Subprogram verifies it
+      /* matches FILE 100 before applying update. Mismatch = 1004.
+
+  * -- Output: Response ----------------------------------------
+  1 #P-RESPONSE-CODE                (N4)    /* OUT
+    /* 0000 = Success — record found and returned
+    /* 1010 = Account number blank or invalid format
+    /* 1011 = Account not found in FILE 100
+    /* 9001 = ADABAS read error — check P-ADABAS-RESPONSE
+    /* 9999 = Unexpected system error
+
+  1 #P-RESPONSE-TEXT                (A80)   /* OUT Human-readable description
+  1 #P-ADABAS-RESPONSE              (N3)    /* OUT Raw ADABAS response code
+
+END-DEFINE

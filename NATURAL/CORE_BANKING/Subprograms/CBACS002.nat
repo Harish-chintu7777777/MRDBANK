@@ -1,0 +1,227 @@
+* ============================================================
+* NAME     : CBACS002
+* TYPE     : Subprogram (CALLNAT target)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBACS002
+* PURPOSE  : Account Create Subprogram. Validates new account data,
+*            generates account number, STOREs FILE 100, and calls
+*            CBGLS001 for GL opening entry and CMUTS007 for audit.
+*            Called only from CBACP001 (online) and triggered batch
+*            CBACP002 via MRDBNK.COREBKG.IF.CUSTONB inbound file.
+* PREDICT  : Custom PDA (inline PARAMETER section below)
+* CALLED BY: CBACP001 (account creation online driver)
+*            CBACP002 (account open trigger from onboarding batch)
+* CALLS    : CBACVD01 (validate account + customer data)
+*            CBGLS001 (GL opening entry — debit Cash / credit NOSTRO)
+*            CMUTS007 (audit trail write)
+* DEPENDS  : GDA CMDAG001
+*            LDA CBACL001 (account working storage)
+*            FILE 100 MRD-COREBKG-ACCTMSTR (STORE)
+*            FILE 105 MRD-COREBKG-GLMASTER (via CBGLS001)
+*            FILE 010 MRD-SHARED-AUDIT (via CMUTS007)
+* ET/BT    : Issues ET on success. Issues BT on any error.
+*            All three writes (100, 105, 010) in ONE ET boundary.
+* CALL DEPTH: Level 2 (called by CBACP001 at Level 1)
+*             Calls CBACVD01/CBGLS001/CMUTS007 at Level 3
+* ============================================================
+DEFINE DATA
+  GLOBAL USING CMDAG001
+  LOCAL  USING CBACL001
+  PARAMETER
+    /* Input: new account details */
+    1 #P-IN-CUSTOMER-ID    (A10)    /* -> FILE 050 AA (must exist)
+    1 #P-IN-PRODUCT-CODE   (A6)     /* -> FILE 110 PA (must exist)
+    1 #P-IN-ACCOUNT-TYPE   (A4)     /* CURR SAVG FIXD CALL FCCY
+    1 #P-IN-CURRENCY-CODE  (A3)     /* ISO 4217
+    1 #P-IN-BRANCH-CODE    (A4)     /* -> FILE 035
+    1 #P-IN-RM-ID          (A8)     /* Relationship manager. Blank=unassigned
+    1 #P-IN-STMT-CYCLE     (A2)     /* MN QT HY AN
+    1 #P-IN-STMT-DELIVERY  (A4)     /* EPPR PAPR BOTH NONE
+    1 #P-IN-INIT-DEPOSIT   (P15)    /* Initial deposit amount (may be zero)
+    1 #P-IN-INIT-DEP-CCY   (A3)     /* Currency of initial deposit
+    1 #P-IN-MANDATE-TYPE   (A4)     /* SOLE EORE BOTH
+    1 #P-IN-OD-LIMIT       (P15)    /* Overdraft limit (zero if none)
+    1 #P-IN-TAX-FLAG       (A1)     /* Y=TDS applicable N=Not applicable
+    1 #P-IN-TDS-RATE       (P5)     /* TDS rate (zero if TAX-FLAG=N)
+    /* Output */
+    1 #P-OUT-ACCOUNT-NUMBER (A11)   /* Newly created account number
+    1 #P-RESPONSE-CODE      (N4)
+    1 #P-RESPONSE-TEXT      (A80)
+    1 #P-ADABAS-RESPONSE    (N3)
+  LOCAL
+    1 ACCT-VIEW VIEW OF MRD-COREBKG-ACCTMSTR
+      2 AA    /* ACCOUNT-NUMBER
+      2 AB    /* CUSTOMER-ID
+      2 AC    /* PRODUCT-CODE
+      2 AD    /* ACCOUNT-TYPE
+      2 AE    /* ACCOUNT-STATUS
+      2 AF    /* DATE-OPENED
+      2 AH    /* CURRENCY-CODE
+      2 AI    /* CURRENT-BALANCE
+      2 AJ    /* AVAILABLE-BALANCE
+      2 AK    /* CLEARED-BALANCE
+      2 AL    /* UNCLEARED-BALANCE
+      2 AM    /* OVERDRAFT-LIMIT
+      2 AP    /* INTEREST-RATE-CODE
+      2 AQ    /* CHARGE-SCHEDULE-CODE
+      2 AR    /* STATEMENT-CYCLE
+      2 AS    /* STATEMENT-DELIVERY
+      2 AT    /* BRANCH-CODE
+      2 AU    /* RELATIONSHIP-MGR-ID
+      2 BH    /* JOINT-ACCOUNT-FLAG
+      2 BI    /* MANDATE-TYPE
+      2 BO    /* TAX-WITHHOLDING-FLAG
+      2 BP    /* TDS-RATE
+      2 FA    /* CREATED-BY-USER-ID
+      2 FB    /* CREATED-TIMESTAMP
+      2 FE    /* LAST-UPDATED-PROGRAM
+      2 FF    /* RECORD-VERSION
+      2 FG    /* SYSTEM-OF-ORIGIN
+    /* Validation subprogram PDA fields */
+    1 #VD-RESPONSE-CODE    (N4)
+    1 #VD-RESPONSE-TEXT    (A80)
+    /* GL subprogram fields */
+    1 #GL-DR-ACCOUNT       (A12)
+    1 #GL-CR-ACCOUNT       (A12)
+    1 #GL-RESPONSE-CODE    (N4)
+    1 #GL-RESPONSE-TEXT    (A80)
+    1 #GL-ENTRY-REF        (A12)
+    /* Audit subprogram fields */
+    1 #AUD-RESPONSE-CODE   (N4)
+    1 #AUD-RESPONSE-TEXT   (A80)
+    /* Working */
+    1 #NEW-ACCOUNT-NUMBER  (A11)
+    1 #SEQ-COUNTER         (N7)
+    1 #CHECK-DIGIT         (N1)
+END-DEFINE
+
+* ── Step 1: Validate input via CBACVD01 ────────────────────
+* CALL DEPTH: CBACS002(L2) -> CBACVD01(L3)
+CALLNAT 'CBACVD01'
+  #P-IN-CUSTOMER-ID
+  #P-IN-PRODUCT-CODE
+  #P-IN-ACCOUNT-TYPE
+  #P-IN-CURRENCY-CODE
+  #P-IN-BRANCH-CODE
+  #VD-RESPONSE-CODE
+  #VD-RESPONSE-TEXT
+
+IF #VD-RESPONSE-CODE NE 0
+  MOVE #VD-RESPONSE-CODE TO #P-RESPONSE-CODE
+  MOVE #VD-RESPONSE-TEXT TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Step 2: Generate new account number ────────────────────
+* Format: BBBBTTTNNNNC  (11 chars)
+* B=BranchCode(4) T=TypeCode(3) N=Sequence(4) C=CheckDigit(1)
+* Type codes: CURR=CUR SAVG=SAV FIXD=FXD CALL=CAL FCCY=FCC
+MOVE #P-IN-BRANCH-CODE TO #NEW-ACCOUNT-NUMBER(1:4)
+
+IF #P-IN-ACCOUNT-TYPE = 'CURR'
+  MOVE 'CUR' TO #NEW-ACCOUNT-NUMBER(5:3)
+ELSE IF #P-IN-ACCOUNT-TYPE = 'SAVG'
+  MOVE 'SAV' TO #NEW-ACCOUNT-NUMBER(5:3)
+ELSE IF #P-IN-ACCOUNT-TYPE = 'FIXD'
+  MOVE 'FXD' TO #NEW-ACCOUNT-NUMBER(5:3)
+ELSE IF #P-IN-ACCOUNT-TYPE = 'FCCY'
+  MOVE 'FCC' TO #NEW-ACCOUNT-NUMBER(5:3)
+ELSE
+  MOVE 'CAL' TO #NEW-ACCOUNT-NUMBER(5:3)
+END-IF
+
+/* Sequence: read FILE 015 system parameter for next sequence
+/* (simplified here — production uses ADABAS ISN reservation)
+MOVE *ISN + 1000000 TO #SEQ-COUNTER        /* Placeholder sequence logic
+MOVE EDIT(#SEQ-COUNTER,'9999') TO #NEW-ACCOUNT-NUMBER(8:4)
+MOVE '0' TO #NEW-ACCOUNT-NUMBER(12:1)      /* Check digit (Luhn calculated)
+/* Production: CMUTS013 (Luhn generator) called here
+
+* ── Step 3: Populate ADABAS view for STORE ─────────────────
+MOVE #NEW-ACCOUNT-NUMBER   TO ACCT-VIEW.AA
+MOVE #P-IN-CUSTOMER-ID     TO ACCT-VIEW.AB
+MOVE #P-IN-PRODUCT-CODE    TO ACCT-VIEW.AC
+MOVE #P-IN-ACCOUNT-TYPE    TO ACCT-VIEW.AD
+MOVE 'AC'                  TO ACCT-VIEW.AE  /* Status = Active on open
+MOVE #SYS-BUSINESS-DATE    TO ACCT-VIEW.AF  /* Date opened
+MOVE #P-IN-CURRENCY-CODE   TO ACCT-VIEW.AH
+MOVE 0                     TO ACCT-VIEW.AI  /* Opening balance = zero
+MOVE 0                     TO ACCT-VIEW.AJ
+MOVE 0                     TO ACCT-VIEW.AK
+MOVE 0                     TO ACCT-VIEW.AL
+MOVE #P-IN-OD-LIMIT        TO ACCT-VIEW.AM
+MOVE #P-IN-STMT-CYCLE      TO ACCT-VIEW.AR
+MOVE #P-IN-STMT-DELIVERY   TO ACCT-VIEW.AS
+MOVE #P-IN-BRANCH-CODE     TO ACCT-VIEW.AT
+MOVE #P-IN-RM-ID           TO ACCT-VIEW.AU
+MOVE #P-IN-MANDATE-TYPE    TO ACCT-VIEW.BI
+MOVE #P-IN-TAX-FLAG        TO ACCT-VIEW.BO
+MOVE #P-IN-TDS-RATE        TO ACCT-VIEW.BP
+MOVE #SYS-USER-ID          TO ACCT-VIEW.FA
+MOVE *TIMX                 TO ACCT-VIEW.FB
+MOVE 'CBACS002'            TO ACCT-VIEW.FE
+MOVE 1                     TO ACCT-VIEW.FF  /* Record version starts at 1
+MOVE 'NATV'                TO ACCT-VIEW.FG  /* Natural online/batch origin
+
+* ── Step 4: STORE to FILE 100 ──────────────────────────────
+STORE ACCT-VIEW
+
+IF *ADABAS-RESPONSE NE 0
+  MOVE *ADABAS-RESPONSE  TO #SYS-LAST-ADABAS-RESPONSE
+  MOVE 'CBACS002'        TO #SYS-LAST-ERROR-PROGRAM
+  MOVE 9001              TO #P-RESPONSE-CODE
+  MOVE 'FILE 100 STORE FAILED' TO #P-RESPONSE-TEXT
+  MOVE *ADABAS-RESPONSE  TO #P-ADABAS-RESPONSE
+  BT                              /* Rollback — no partial account creation
+  ESCAPE ROUTINE
+END-IF
+
+* ── Step 5: GL opening entry via CBGLS001 ──────────────────
+* CALL DEPTH: CBACS002(L2) -> CBGLS001(L3)
+/* Opening entry: Debit customer account GL / Credit suspense
+MOVE 'CUST-ACCT-OPEN  ' TO #GL-DR-ACCOUNT    /* Customer accounts GL
+MOVE 'SUSP-ACCT-OPEN  ' TO #GL-CR-ACCOUNT    /* Opening suspense
+
+CALLNAT 'CBGLS001'
+  #NEW-ACCOUNT-NUMBER         /* Entity key
+  'ACCT'                      /* Entity type
+  #GL-DR-ACCOUNT              /* Debit GL account
+  #GL-CR-ACCOUNT              /* Credit GL account
+  0                           /* Amount zero (no initial deposit here)
+  #P-IN-CURRENCY-CODE         /* Currency
+  'ACOP'                      /* GL transaction type code
+  #SYS-BUSINESS-DATE          /* Value date
+  #GL-RESPONSE-CODE
+  #GL-RESPONSE-TEXT
+  #GL-ENTRY-REF
+
+IF #GL-RESPONSE-CODE NE 0
+  MOVE #GL-RESPONSE-CODE TO #P-RESPONSE-CODE
+  MOVE #GL-RESPONSE-TEXT TO #P-RESPONSE-TEXT
+  BT                              /* Rollback account creation if GL fails
+  ESCAPE ROUTINE
+END-IF
+
+* ── Step 6: Audit trail via CMUTS007 ───────────────────────
+* CALL DEPTH: CBACS002(L2) -> CMUTS007(L3)
+CALLNAT 'CMUTS007'
+  'CRTE'                      /* Action: Create
+  'ACCT'                      /* Entity type: Account
+  #NEW-ACCOUNT-NUMBER         /* Entity key
+  100                         /* File number
+  ' '                         /* Before image (blank for creation)
+  #NEW-ACCOUNT-NUMBER         /* After image (new account number)
+  'CBACS002'                  /* Calling program
+  #AUD-RESPONSE-CODE
+  #AUD-RESPONSE-TEXT
+
+/* Audit failure does NOT cause BT (see CMUTS007 design note)
+
+* ── Step 7: Commit ─────────────────────────────────────────
+ET
+
+MOVE #NEW-ACCOUNT-NUMBER TO #P-OUT-ACCOUNT-NUMBER
+MOVE 0000                TO #P-RESPONSE-CODE
+MOVE 'ACCOUNT CREATED SUCCESSFULLY' TO #P-RESPONSE-TEXT
+
+END

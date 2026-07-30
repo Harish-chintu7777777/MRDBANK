@@ -1,0 +1,104 @@
+* ============================================================
+* NAME     : LNMOL001
+* TYPE     : Local Data Area (LDA)
+* LIBRARY  : MRDLNLIB
+* OBJECT   : LNMOL001
+* PURPOSE  : Working storage for loan master record. Mirrors the
+*            FILE 200 (MRD-LOANS-LOANMSTR) structure field-for-field.
+*            Used internally by subprograms that read/write FILE 200.
+*            Callers across domains use LNMOA001 (PDA) instead.
+* USED BY  : LNMOS001 (read), LNMOS002 (create), LNMOS003 (update)
+*            LNMOVD01 (validation — read-only fields)
+*            LNIAP001 (accrual — reads MM, writes MM)
+*            LNRPS001 (repayment — reads/writes balances)
+*            LNDSP001 (disbursement — writes LK, LJ)
+* CAUTION  : OUTSTANDING-PRINCIPAL (#LN-OUTSTANDING-PRINCIPAL) is the
+*            authoritative loan balance. Programs must NEVER reconstruct
+*            it by summing FILE 205 schedule records. Read from FILE 200.
+* CHANGED  : 1994-06-15  Initial creation.
+*            2001-03-22  Added NPA fields (MA-MD).
+*            2019-05-20  Added #LN-RECORD-VERSION for optimistic lock.
+* ============================================================
+DEFINE DATA LOCAL
+
+  1 LN-VIEW VIEW OF MRD-LOANS-LOANMSTR
+    2 LA    /* LOAN-ACCOUNT-NUMBER
+    2 LB    /* CUSTOMER-ID
+    2 LC    /* PRODUCT-CODE
+    2 LD    /* LOAN-TYPE
+    2 LE    /* LOAN-STATUS
+    2 LF    /* SANCTION-DATE
+    2 LG    /* FIRST-DISBURSEMENT-DATE
+    2 LH    /* MATURITY-DATE
+    2 LI    /* SANCTIONED-AMOUNT
+    2 LJ    /* OUTSTANDING-PRINCIPAL
+    2 LK    /* TOTAL-DISBURSED-AMOUNT
+    2 LL    /* INTEREST-RATE
+    2 LM    /* RATE-TYPE
+    2 LN    /* EMI-AMOUNT
+    2 LO    /* TENOR-MONTHS
+    2 LP    /* INSTALLMENTS-TOTAL
+    2 LQ    /* INSTALLMENTS-PAID
+    2 LR    /* INSTALLMENTS-OVERDUE
+    2 LS    /* REPAYMENT-DAY-OF-MONTH
+    2 LT    /* NEXT-DUE-DATE
+    2 LU    /* LAST-PAYMENT-DATE
+    2 LV    /* TOTAL-PRINCIPAL-PAID
+    2 LW    /* TOTAL-INTEREST-PAID
+    2 LX    /* OVERDUE-PRINCIPAL
+    2 LY    /* OVERDUE-INTEREST
+    2 LZ    /* OVERDUE-CHARGES
+    2 MA    /* NPA-CATEGORY
+    2 MB    /* NPA-CLASSIFICATION-DATE
+    2 MC    /* NPA-PROVISION-PERCENT
+    2 MD    /* NPA-PROVISION-AMOUNT
+    2 ME    /* OVERDUE-DAYS
+    2 MF    /* LINKED-CASA-ACCOUNT
+    2 MG    /* COLLATERAL-CODE
+    2 MH    /* COLLATERAL-VALUE
+    2 MI    /* COLLATERAL-VALUATION-DATE
+    2 MJ    /* PROCESSING-BRANCH
+    2 MK    /* LOAN-OFFICER-ID
+    2 ML    /* CURRENCY-CODE
+    2 MM    /* INTEREST-ACCRUED-PENDING
+    2 MN    /* PENAL-INTEREST-RATE
+    2 MO    /* TOTAL-CHARGES-LEVIED
+    2 MP    /* RESTRUCTURE-FLAG
+    2 MQ    /* RESTRUCTURE-DATE
+    2 MR    /* RESTRUCTURE-COUNT
+    2 MS    /* RESTRUCTURE-PRINCIPAL-OUTSTANDING
+    2 MT    /* WRITE-OFF-DATE
+    2 MU    /* WRITE-OFF-AMOUNT
+    2 MV    /* WRITE-OFF-AUTHORISER
+    2 DA (1:6)  /* DISBURSEMENT-TRANCHES (periodic group, max 6)
+      3 DB  /* TRANCHE-DATE
+      3 DC  /* TRANCHE-AMOUNT
+      3 DD  /* TRANCHE-TRANSACTION-ID
+      3 DE  /* TRANCHE-STATUS
+      3 DF  /* TRANCHE-NARRATIVE
+    2 FA    /* CREATED-BY-USER-ID
+    2 FB    /* CREATED-TIMESTAMP
+    2 FC    /* LAST-UPDATED-BY
+    2 FD    /* LAST-UPDATED-TIMESTAMP
+    2 FE    /* LAST-UPDATED-PROGRAM
+    2 FF    /* RECORD-VERSION
+
+  * -- Working variables used by loan subprograms ---------------
+  1 #LN-WORK-DAILY-INTEREST         (P15)
+    /* Calculated as: OUTSTANDING-PRINCIPAL * INTEREST-RATE / 36500
+    /* Used by LNIAP001 to accumulate to MM (INTEREST-ACCRUED-PENDING).
+
+  1 #LN-WORK-OVERDUE-AMOUNT         (P15)
+    /* Sum of LX + LY + LZ. Used by LNRPS001 for allocation logic.
+
+  1 #LN-WORK-PENAL-DAILY            (P15)
+    /* Calculated as: OVERDUE-PRINCIPAL * PENAL-INTEREST-RATE / 36500
+
+  1 #LN-WORK-PROVISION-AMOUNT       (P15)
+    /* Calculated as: OUTSTANDING-PRINCIPAL * NPA-PROVISION-PERCENT / 100
+
+  1 #LN-ISN                         (B4)
+    /* ADABAS ISN of last-read FILE 200 record.
+    /* Used for HOLD-mode UPDATE operations by LNMOS003.
+
+END-DEFINE

@@ -1,0 +1,255 @@
+* ============================================================
+* NAME     : LNMOS002
+* TYPE     : Subprogram (CALLNAT target)
+* LIBRARY  : MRDLNLIB
+* OBJECT   : LNMOS002
+* PURPOSE  : Loan Master Create Subprogram. Validates new loan data,
+*            generates a loan account number, STOREs FILE 200 (LOAN
+*            MASTER), raises a GL sanction entry via CBGLS001, and
+*            writes an audit record via CMUTS007.
+*            Status on creation is SA (Sanctioned). Disbursement is
+*            a separate transaction executed by LNDSP001.
+*            All three writes (FILE 200, FILE 105, FILE 010) are
+*            committed in a single ET boundary.
+* PREDICT  : Custom inline PARAMETER section
+* CALLED BY: LNMOP001 (loan origination online driver)
+*            LNIAP010 (loan create from batch origination file)
+* CALLS    : LNMOVD01 (validate customer, product, loan type, amount)
+*            CBGLS001 (GL sanction entry — Sanction Suspense / Liability)
+*            CMUTS007 (audit trail write)
+* DEPENDS  : GDA CMDAG001
+*            LDA LNMOL001 (LN-VIEW for FILE 200 STORE)
+*            FILE 200 MRD-LOANS-LOANMSTR (STORE)
+*            FILE 105 MRD-COREBKG-GLMASTER (via CBGLS001)
+*            FILE 010 MRD-SHARED-AUDIT     (via CMUTS007)
+* ET/BT    : Issues ET on success. Issues BT on any error before ET.
+* CALL DEPTH: Level 2 (called by LNMOP001/LNIAP010 at Level 1)
+*             Calls LNMOVD01/CBGLS001/CMUTS007 at Level 3
+* ============================================================
+DEFINE DATA
+  GLOBAL USING CMDAG001
+  LOCAL  USING LNMOL001
+  PARAMETER
+    /* Input: new loan details */
+    1 #P-IN-CUSTOMER-ID       (A10)   /* -> FILE 050 AA (must exist)
+    1 #P-IN-PRODUCT-CODE      (A6)    /* -> FILE 110 PA (must be a loan product)
+    1 #P-IN-LOAN-TYPE         (A4)    /* TERM REVO MORT VEHI PERS EDUC AGRI MSME CRED
+    1 #P-IN-CURRENCY-CODE     (A3)    /* ISO 4217 — normally INR
+    1 #P-IN-BRANCH-CODE       (A4)    /* -> FILE 035 (originating branch)
+    1 #P-IN-LOAN-OFFICER-ID   (A8)    /* Natural Security user ID of sanctioning officer
+    1 #P-IN-SANCTIONED-AMOUNT (P15)   /* Approved loan amount (must be > 0)
+    1 #P-IN-TENOR-MONTHS      (N3)    /* Original tenor in months (1-360)
+    1 #P-IN-INTEREST-RATE     (P7)    /* Format 5.2 — e.g. 01050 = 10.50%
+    1 #P-IN-RATE-TYPE         (A1)    /* F=Fixed  V=Variable (MCLR-linked)
+    1 #P-IN-EMI-AMOUNT        (P15)   /* Pre-computed EMI; passed in from LNSCHP001
+    1 #P-IN-REPAYMENT-DAY     (N2)    /* Day of month EMI falls due (1-28)
+    1 #P-IN-MATURITY-DATE     (P8)    /* Expected final repayment date YYYYMMDD
+    1 #P-IN-LINKED-CASA-ACCT  (A11)   /* Primary CASA for auto-EMI debit -> FILE 100 AA
+    1 #P-IN-COLLATERAL-CODE   (A10)   /* -> FILE 210 CA  (blank if unsecured loan)
+    1 #P-IN-COLLATERAL-VALUE  (P15)   /* Market value at sanction (zero if unsecured)
+    1 #P-IN-PENAL-RATE        (P5)    /* Extra rate on overdue amount (3.2 packed)
+                                      /* e.g. 00200 = 2.00% per annum above contractual
+    /* Output */
+    1 #P-OUT-LOAN-ACCOUNT-NUMBER (A12)  /* Newly generated loan account number
+    1 #P-RESPONSE-CODE        (N4)
+      /* 0000 = Loan created successfully
+      /* 1001 = Validation failed — see P-RESPONSE-TEXT for detail
+      /* 9001 = FILE 200 STORE error — check P-ADABAS-RESPONSE
+      /* 9002 = CBGLS001 GL sanction entry failed
+      /* 9999 = Unexpected system error
+    1 #P-RESPONSE-TEXT        (A80)
+    1 #P-ADABAS-RESPONSE      (N3)
+  LOCAL
+    /* Validation subprogram interface */
+    1 #VD-RESPONSE-CODE       (N4)
+    1 #VD-RESPONSE-TEXT       (A80)
+    /* GL subprogram interface */
+    1 #GL-DR-ACCOUNT          (A12)
+    1 #GL-CR-ACCOUNT          (A12)
+    1 #GL-RESPONSE-CODE       (N4)
+    1 #GL-RESPONSE-TEXT       (A80)
+    1 #GL-ENTRY-REF           (A12)
+    /* Audit subprogram interface */
+    1 #AUD-RESPONSE-CODE      (N4)
+    1 #AUD-RESPONSE-TEXT      (A80)
+    /* Working */
+    1 #NEW-LOAN-ACCOUNT       (A12)
+    1 #SEQ-COUNTER            (N8)
+END-DEFINE
+
+* ── Step 1: Validate input via LNMOVD01 ────────────────────
+* CALL DEPTH: LNMOS002(L2) -> LNMOVD01(L3)
+CALLNAT 'LNMOVD01'
+  #P-IN-CUSTOMER-ID
+  #P-IN-PRODUCT-CODE
+  #P-IN-LOAN-TYPE
+  #P-IN-CURRENCY-CODE
+  #P-IN-BRANCH-CODE
+  #P-IN-SANCTIONED-AMOUNT
+  #P-IN-TENOR-MONTHS
+  #P-IN-INTEREST-RATE
+  #P-IN-RATE-TYPE
+  #P-IN-REPAYMENT-DAY
+  #VD-RESPONSE-CODE
+  #VD-RESPONSE-TEXT
+
+IF #VD-RESPONSE-CODE NE 0
+  MOVE #VD-RESPONSE-CODE TO #P-RESPONSE-CODE
+  MOVE #VD-RESPONSE-TEXT TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Step 2: Generate loan account number ───────────────────
+* Format: BBBBTTTNNNNNC  (12 chars total)
+* B = Branch code    (4 chars, positions 1-4)
+* T = Type code      (3 chars, positions 5-7)
+* N = Sequence       (4 chars, positions 8-11)
+* C = Check digit    (1 char,  position 12)
+MOVE #P-IN-BRANCH-CODE TO #NEW-LOAN-ACCOUNT(1:4)
+
+IF #P-IN-LOAN-TYPE = 'TERM'
+  MOVE 'TRM' TO #NEW-LOAN-ACCOUNT(5:3)
+ELSE IF #P-IN-LOAN-TYPE = 'REVO'
+  MOVE 'RVO' TO #NEW-LOAN-ACCOUNT(5:3)
+ELSE IF #P-IN-LOAN-TYPE = 'MORT'
+  MOVE 'MRT' TO #NEW-LOAN-ACCOUNT(5:3)
+ELSE IF #P-IN-LOAN-TYPE = 'VEHI'
+  MOVE 'VHI' TO #NEW-LOAN-ACCOUNT(5:3)
+ELSE IF #P-IN-LOAN-TYPE = 'PERS'
+  MOVE 'PRS' TO #NEW-LOAN-ACCOUNT(5:3)
+ELSE IF #P-IN-LOAN-TYPE = 'EDUC'
+  MOVE 'EDC' TO #NEW-LOAN-ACCOUNT(5:3)
+ELSE IF #P-IN-LOAN-TYPE = 'AGRI'
+  MOVE 'AGR' TO #NEW-LOAN-ACCOUNT(5:3)
+ELSE IF #P-IN-LOAN-TYPE = 'MSME'
+  MOVE 'MSM' TO #NEW-LOAN-ACCOUNT(5:3)
+ELSE
+  MOVE 'CRD' TO #NEW-LOAN-ACCOUNT(5:3)   /* Default covers CRED
+END-IF
+
+/* Sequence offset +2000000 separates loan ISN space from account ISN space.
+/* Production: CMUTS013 (Luhn generator) provides check digit in position 12.
+MOVE *ISN + 2000000 TO #SEQ-COUNTER
+MOVE EDIT(#SEQ-COUNTER,'9999') TO #NEW-LOAN-ACCOUNT(8:4)
+MOVE '0' TO #NEW-LOAN-ACCOUNT(12:1)      /* Check digit placeholder
+
+* ── Step 3: Populate LN-VIEW for STORE ─────────────────────
+MOVE #NEW-LOAN-ACCOUNT        TO LN-VIEW.LA
+MOVE #P-IN-CUSTOMER-ID        TO LN-VIEW.LB
+MOVE #P-IN-PRODUCT-CODE       TO LN-VIEW.LC
+MOVE #P-IN-LOAN-TYPE          TO LN-VIEW.LD
+MOVE 'SA'                     TO LN-VIEW.LE   /* Sanctioned — not yet disbursed
+MOVE #SYS-BUSINESS-DATE       TO LN-VIEW.LF   /* Sanction date = today's business date
+MOVE 0                        TO LN-VIEW.LG   /* First disbursement date: null (NV)
+MOVE #P-IN-MATURITY-DATE      TO LN-VIEW.LH
+MOVE #P-IN-SANCTIONED-AMOUNT  TO LN-VIEW.LI
+MOVE 0                        TO LN-VIEW.LJ   /* Outstanding principal = 0 at sanction
+MOVE 0                        TO LN-VIEW.LK   /* Total disbursed = 0 at sanction
+MOVE #P-IN-INTEREST-RATE      TO LN-VIEW.LL
+MOVE #P-IN-RATE-TYPE          TO LN-VIEW.LM
+MOVE #P-IN-EMI-AMOUNT         TO LN-VIEW.LN
+MOVE #P-IN-TENOR-MONTHS       TO LN-VIEW.LO
+MOVE #P-IN-TENOR-MONTHS       TO LN-VIEW.LP   /* Installments total = tenor months
+MOVE 0                        TO LN-VIEW.LQ   /* Installments paid = 0
+MOVE 0                        TO LN-VIEW.LR   /* Installments overdue = 0
+MOVE #P-IN-REPAYMENT-DAY      TO LN-VIEW.LS
+MOVE 0                        TO LN-VIEW.LT   /* Next due date: set by LNDSP001 on disbursement
+MOVE 0                        TO LN-VIEW.LU   /* Last payment date: null (NV)
+MOVE 0                        TO LN-VIEW.LV   /* Total principal paid = 0
+MOVE 0                        TO LN-VIEW.LW   /* Total interest paid = 0
+MOVE 0                        TO LN-VIEW.LX   /* Overdue principal = 0
+MOVE 0                        TO LN-VIEW.LY   /* Overdue interest = 0
+MOVE 0                        TO LN-VIEW.LZ   /* Overdue charges = 0
+MOVE 'N'                      TO LN-VIEW.MA   /* NPA category = Normal (performing)
+MOVE 0                        TO LN-VIEW.MB   /* NPA classification date: null (NV)
+MOVE 0                        TO LN-VIEW.MC   /* NPA provision percent = 0
+MOVE 0                        TO LN-VIEW.MD   /* NPA provision amount = 0
+MOVE 0                        TO LN-VIEW.ME   /* Overdue days = 0
+MOVE #P-IN-LINKED-CASA-ACCT   TO LN-VIEW.MF
+MOVE #P-IN-COLLATERAL-CODE    TO LN-VIEW.MG
+MOVE #P-IN-COLLATERAL-VALUE   TO LN-VIEW.MH
+MOVE #SYS-BUSINESS-DATE       TO LN-VIEW.MI   /* Collateral valuation date = sanction date
+MOVE #P-IN-BRANCH-CODE        TO LN-VIEW.MJ
+MOVE #P-IN-LOAN-OFFICER-ID    TO LN-VIEW.MK
+MOVE #P-IN-CURRENCY-CODE      TO LN-VIEW.ML
+MOVE 0                        TO LN-VIEW.MM   /* Interest accrued pending = 0
+MOVE #P-IN-PENAL-RATE         TO LN-VIEW.MN
+MOVE 0                        TO LN-VIEW.MO   /* Total charges levied = 0
+MOVE 'N'                      TO LN-VIEW.MP   /* Restructure flag = No
+MOVE 0                        TO LN-VIEW.MQ   /* Restructure date: null (NV)
+MOVE 0                        TO LN-VIEW.MR   /* Restructure count = 0
+MOVE 0                        TO LN-VIEW.MS   /* Restructure principal outstanding = 0
+MOVE 0                        TO LN-VIEW.MT   /* Write-off date: null (NV)
+MOVE 0                        TO LN-VIEW.MU   /* Write-off amount = 0
+MOVE ' '                      TO LN-VIEW.MV   /* Write-off authoriser: blank (NV)
+/* DA periodic group (disbursement tranches): not populated at sanction.
+/* PE occurrence count = 0; ADABAS stores no tranche records.
+MOVE #SYS-USER-ID             TO LN-VIEW.FA   /* Created by
+MOVE *TIMX                    TO LN-VIEW.FB   /* Created timestamp
+MOVE 'LNMOS002'               TO LN-VIEW.FE   /* Last updated program
+MOVE 1                        TO LN-VIEW.FF   /* Record version starts at 1
+MOVE 'NATV'                   TO LN-VIEW.FG   /* System of origin
+
+* ── Step 4: STORE to FILE 200 ──────────────────────────────
+STORE LN-VIEW
+
+IF *ADABAS-RESPONSE NE 0
+  MOVE *ADABAS-RESPONSE  TO #SYS-LAST-ADABAS-RESPONSE
+  MOVE 'LNMOS002'        TO #SYS-LAST-ERROR-PROGRAM
+  MOVE 9001              TO #P-RESPONSE-CODE
+  MOVE 'FILE 200 STORE FAILED' TO #P-RESPONSE-TEXT
+  MOVE *ADABAS-RESPONSE  TO #P-ADABAS-RESPONSE
+  BT                              /* Rollback — no partial loan creation
+  ESCAPE ROUTINE
+END-IF
+
+* ── Step 5: GL sanction entry via CBGLS001 ─────────────────
+* CALL DEPTH: LNMOS002(L2) -> CBGLS001(L3)
+/* Sanction entry: Debit Loan Sanction Suspense / Credit Sanctioned Loan Liability.
+/* Amount = sanctioned amount. Reversed when disbursement is posted by LNDSP001.
+MOVE 'LOAN-SANCT-SUSP' TO #GL-DR-ACCOUNT    /* Sanction suspense GL
+MOVE 'LOAN-SANCT-LIAB' TO #GL-CR-ACCOUNT    /* Sanctioned loan liability GL
+
+CALLNAT 'CBGLS001'
+  #NEW-LOAN-ACCOUNT             /* Entity key
+  'LOAN'                        /* Entity type
+  #GL-DR-ACCOUNT                /* Debit GL account
+  #GL-CR-ACCOUNT                /* Credit GL account
+  #P-IN-SANCTIONED-AMOUNT       /* Sanction amount
+  #P-IN-CURRENCY-CODE           /* Currency
+  'LNSN'                        /* GL transaction type code — Loan Sanction
+  #SYS-BUSINESS-DATE            /* Value date
+  #GL-RESPONSE-CODE
+  #GL-RESPONSE-TEXT
+  #GL-ENTRY-REF
+
+IF #GL-RESPONSE-CODE NE 0
+  MOVE 9002              TO #P-RESPONSE-CODE
+  MOVE #GL-RESPONSE-TEXT TO #P-RESPONSE-TEXT
+  BT                              /* Rollback FILE 200 STORE if GL fails
+  ESCAPE ROUTINE
+END-IF
+
+* ── Step 6: Audit trail via CMUTS007 ───────────────────────
+* CALL DEPTH: LNMOS002(L2) -> CMUTS007(L3)
+CALLNAT 'CMUTS007'
+  'CRTE'                        /* Action: Create
+  'LOAN'                        /* Entity type: Loan
+  #NEW-LOAN-ACCOUNT             /* Entity key
+  200                           /* File number
+  ' '                           /* Before image (blank for new creation)
+  #NEW-LOAN-ACCOUNT             /* After image (new loan account number)
+  'LNMOS002'                    /* Calling program
+  #AUD-RESPONSE-CODE
+  #AUD-RESPONSE-TEXT
+
+/* Audit failure does NOT cause BT (see CMUTS007 design note)
+
+* ── Step 7: Commit ─────────────────────────────────────────
+ET
+
+MOVE #NEW-LOAN-ACCOUNT TO #P-OUT-LOAN-ACCOUNT-NUMBER
+MOVE 0000              TO #P-RESPONSE-CODE
+MOVE 'LOAN ACCOUNT CREATED SUCCESSFULLY' TO #P-RESPONSE-TEXT
+
+END

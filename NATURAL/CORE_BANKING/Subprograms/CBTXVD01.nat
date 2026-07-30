@@ -1,0 +1,170 @@
+* ============================================================
+* NAME     : CBTXVD01
+* TYPE     : Subprogram (CALLNAT target)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBTXVD01
+* PURPOSE  : Transaction Validation Subprogram. Validates a proposed
+*            transaction BEFORE CBTXS001 applies any ADABAS updates.
+*            Checks: account active, not frozen, sufficient funds,
+*            OD limit, transaction type validity, future value date.
+*            Returns a go/no-go decision with reason code.
+*            Called by CBTXP001 (online) and CBTXP010 (batch)
+*            before invoking the posting engine CBTXS001.
+* CALLED BY: CBTXP001 (teller transaction online driver)
+*            CBTXP010 (batch transaction poster)
+* CALLS    : CBACS001 (reads account status and balances — R mode)
+* DEPENDS  : GDA CMDAG001
+*            FILE 100 MRD-COREBKG-ACCTMSTR (READ via CBACS001)
+* ADABAS   : No direct ADABAS access — reads only via CBACS001
+* ET/BT    : None issued — pure validation.
+* CALL DEPTH: Level 2 or 3 depending on caller.
+*             CBTXP001(L1) -> CBTXVD01(L2) -> CBACS001(L3)
+* ============================================================
+DEFINE DATA
+  GLOBAL USING CMDAG001
+  PARAMETER
+    1 #P-ACCOUNT-NUMBER      (A11)   /* IN
+    1 #P-DR-CR-INDICATOR     (A1)    /* IN: D=Debit C=Credit
+    1 #P-AMOUNT              (P15)   /* IN: Always positive
+    1 #P-CURRENCY-CODE       (A3)    /* IN: Transaction currency
+    1 #P-VALUE-DATE          (P8)    /* IN: YYYYMMDD
+    1 #P-TXN-TYPE-CODE       (A4)    /* IN: DPSC WDSC CNIN etc.
+    1 #P-OVERRIDE-LIMIT      (A1)    /* IN: Y=Allow OD override
+    1 #P-RESPONSE-CODE       (N4)    /* OUT
+    1 #P-RESPONSE-TEXT       (A80)   /* OUT
+    /* Read-back for caller use (avoids second CBACS001 call) */
+    1 #P-ACCT-STATUS         (A2)    /* OUT: Current account status
+    1 #P-AVAIL-BALANCE       (P15)   /* OUT: Available balance
+    1 #P-CURRENT-BALANCE     (P15)   /* OUT: Current balance
+    1 #P-OD-LIMIT            (P15)   /* OUT: OD limit
+    1 #P-CURRENCY            (A3)    /* OUT: Account currency
+    1 #P-RECORD-VERSION      (P5)    /* OUT: For caller to pass to CBTXS001
+  LOCAL
+    /* CBACS001 PDA */
+    1 #ACCT-PDA PARAMETER USING CBACA001
+    /* Derived */
+    1 #EFFECTIVE-LIMIT       (P15)   /* Available + OD limit
+    1 #VALID-TYPE            (A1)
+END-DEFINE
+
+MOVE 0    TO #P-RESPONSE-CODE
+MOVE 'N'  TO #VALID-TYPE
+
+* ── Validation 1: Basic input checks ───────────────────────
+IF #P-ACCOUNT-NUMBER = ' '
+  MOVE 1010 TO #P-RESPONSE-CODE
+  MOVE 'ACCOUNT NUMBER IS BLANK' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+IF #P-AMOUNT <= 0
+  MOVE 1020 TO #P-RESPONSE-CODE
+  MOVE 'TRANSACTION AMOUNT MUST BE GREATER THAN ZERO' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+IF #P-DR-CR-INDICATOR NE 'D' AND #P-DR-CR-INDICATOR NE 'C'
+  MOVE 1021 TO #P-RESPONSE-CODE
+  MOVE 'DR-CR INDICATOR MUST BE D OR C' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Validation 2: Value date cannot be future ──────────────
+IF #P-VALUE-DATE > #SYS-BUSINESS-DATE
+  MOVE 1005 TO #P-RESPONSE-CODE
+  MOVE 'FUTURE VALUE DATE NOT PERMITTED' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Validation 3: Transaction type code ────────────────────
+/* Production reads full list from FILE 015 parameter table */
+IF #P-TXN-TYPE-CODE = 'DPSC' OR #P-TXN-TYPE-CODE = 'WDSC'
+   OR #P-TXN-TYPE-CODE = 'DPCH' OR #P-TXN-TYPE-CODE = 'WDCH'
+   OR #P-TXN-TYPE-CODE = 'DPRT' OR #P-TXN-TYPE-CODE = 'DPNF'
+   OR #P-TXN-TYPE-CODE = 'WDRT' OR #P-TXN-TYPE-CODE = 'WDNF'
+   OR #P-TXN-TYPE-CODE = 'CNIN' OR #P-TXN-TYPE-CODE = 'CNCH'
+   OR #P-TXN-TYPE-CODE = 'CNTD' OR #P-TXN-TYPE-CODE = 'CNRV'
+   OR #P-TXN-TYPE-CODE = 'DPLO' OR #P-TXN-TYPE-CODE = 'WDLO'
+   OR #P-TXN-TYPE-CODE = 'DPSW' OR #P-TXN-TYPE-CODE = 'WDSW'
+  MOVE 'Y' TO #VALID-TYPE
+END-IF
+
+IF #VALID-TYPE = 'N'
+  MOVE 1009 TO #P-RESPONSE-CODE
+  MOVE 'TRANSACTION TYPE CODE INVALID OR NOT IN FILE 015' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Validation 4: Read account via CBACS001 ────────────────
+* CALL DEPTH: CBTXVD01(L2) -> CBACS001(L3)
+MOVE #P-ACCOUNT-NUMBER TO #ACCT-PDA.#P-ACCOUNT-NUMBER
+MOVE 'R'               TO #ACCT-PDA.#P-LOCK-MODE
+
+CALLNAT 'CBACS001'
+  #ACCT-PDA.#P-ACCOUNT-NUMBER
+  #ACCT-PDA.#P-LOCK-MODE
+  #ACCT-PDA.#P-ACCOUNT-RECORD
+  #ACCT-PDA.#P-RESPONSE-CODE
+  #ACCT-PDA.#P-RESPONSE-TEXT
+  #ACCT-PDA.#P-ADABAS-RESPONSE
+
+IF #ACCT-PDA.#P-RESPONSE-CODE NE 0
+  MOVE #ACCT-PDA.#P-RESPONSE-CODE TO #P-RESPONSE-CODE
+  MOVE #ACCT-PDA.#P-RESPONSE-TEXT TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+/* Return account data for caller to avoid re-read */
+MOVE #ACCT-PDA.#P-ACCOUNT-RECORD.#P-ACCOUNT-STATUS  TO #P-ACCT-STATUS
+MOVE #ACCT-PDA.#P-ACCOUNT-RECORD.#P-AVAILABLE-BALANCE TO #P-AVAIL-BALANCE
+MOVE #ACCT-PDA.#P-ACCOUNT-RECORD.#P-CURRENT-BALANCE   TO #P-CURRENT-BALANCE
+MOVE #ACCT-PDA.#P-ACCOUNT-RECORD.#P-OVERDRAFT-LIMIT   TO #P-OD-LIMIT
+MOVE #ACCT-PDA.#P-ACCOUNT-RECORD.#P-CURRENCY-CODE     TO #P-CURRENCY
+MOVE #ACCT-PDA.#P-ACCOUNT-RECORD.#P-RECORD-VERSION    TO #P-RECORD-VERSION
+
+* ── Validation 5: Account status ───────────────────────────
+IF #P-ACCT-STATUS = 'CL'
+  MOVE 1006 TO #P-RESPONSE-CODE
+  MOVE 'ACCOUNT IS CLOSED - CANNOT POST TRANSACTION' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+IF #P-ACCT-STATUS = 'FR' OR #P-ACCT-STATUS = 'SZ'
+  MOVE 1002 TO #P-RESPONSE-CODE
+  MOVE 'ACCOUNT IS FROZEN OR SEIZED - CANNOT POST' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+IF #P-ACCT-STATUS = 'DM'
+  /* Dormant accounts require manager override in online channel */
+  /* Batch postings (interest, charges) bypass this check */
+  MOVE 1007 TO #P-RESPONSE-CODE
+  MOVE 'ACCOUNT IS DORMANT - MANAGER OVERRIDE REQUIRED' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Validation 6: Funds check (debit transactions only) ────
+IF #P-DR-CR-INDICATOR = 'D'
+  COMPUTE #EFFECTIVE-LIMIT = #P-AVAIL-BALANCE + #P-OD-LIMIT
+  IF #P-OVERRIDE-LIMIT = 'Y'
+    /* Override: check against current balance + OD limit */
+    /* Requires RACF authority MRDBNK.OD.OVERRIDE */
+    IF #P-AMOUNT > (#P-CURRENT-BALANCE + #P-OD-LIMIT)
+      MOVE 1003 TO #P-RESPONSE-CODE
+      MOVE 'OVERDRAFT LIMIT EXCEEDED EVEN WITH OVERRIDE' TO #P-RESPONSE-TEXT
+      ESCAPE ROUTINE
+    END-IF
+  ELSE
+    IF #P-AMOUNT > #EFFECTIVE-LIMIT
+      MOVE 1001 TO #P-RESPONSE-CODE
+      MOVE 'INSUFFICIENT FUNDS - AVAILABLE BALANCE INSUFFICIENT' TO #P-RESPONSE-TEXT
+      ESCAPE ROUTINE
+    END-IF
+  END-IF
+END-IF
+
+* ── All validations passed ──────────────────────────────────
+MOVE 0000 TO #P-RESPONSE-CODE
+MOVE 'TRANSACTION VALIDATION PASSED' TO #P-RESPONSE-TEXT
+
+END

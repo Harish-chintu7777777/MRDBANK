@@ -1,0 +1,160 @@
+* ============================================================
+* NAME     : CBACP001
+* TYPE     : Program (Online Driver)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBACP001
+* PURPOSE  : Account Creation Online Driver. Entry point for teller
+*            or branch officer creating a new bank account.
+*            Displays map CBACM001, collects input, validates via
+*            CBACVD01, and creates account via CBACS002.
+*            FULL CALL CHAIN:
+*              CBACP001 (L1)
+*                -> CBACVD01 (L2) [pre-validation]
+*                   -> CBACS001 (L3) [customer existence check]
+*                -> CBACS002 (L2) [account create]
+*                   -> CBACVD01 (L3) [re-validates]
+*                   -> CBGLS001 (L3) [GL opening entry]
+*                      -> CMUTS007 (L4) [GL audit]
+*                   -> CMUTS007 (L3) [account create audit]
+* CICS TRANSACTION: CACR (Account Create)
+* MAP      : CBACM001 (account creation input/output map)
+* CALLED BY: ETP online terminal session (CICS transaction CACR)
+* DEPENDS  : GDA CMDAG001
+*            LDA CBACL001 (account working storage)
+*            Calls CBACVD01, CBACS002 (see above)
+* ADABAS   : No direct access — all via subprograms
+* CHANGED  : 1994-02-10  Initial creation
+*            2015-03-20  Added OD limit field to map
+*            2021-07-01  Added EOD check — block creation during EOD
+* ============================================================
+DEFINE DATA
+  GLOBAL USING CMDAG001
+  LOCAL  USING CBACL001
+  LOCAL
+    /* Screen input fields (map CBACM001) */
+    1 #SCR-CUSTOMER-ID      (A10)
+    1 #SCR-PRODUCT-CODE     (A6)
+    1 #SCR-ACCOUNT-TYPE     (A4)
+    1 #SCR-CURRENCY         (A3)
+    1 #SCR-BRANCH-CODE      (A4)
+    1 #SCR-RM-ID            (A8)
+    1 #SCR-STMT-CYCLE       (A2)
+    1 #SCR-STMT-DELIVERY    (A4)
+    1 #SCR-INIT-DEPOSIT     (N15)
+    1 #SCR-MANDATE-TYPE     (A4)
+    1 #SCR-OD-LIMIT         (N15)
+    1 #SCR-TAX-FLAG         (A1)
+    1 #SCR-TDS-RATE         (N5)
+    /* Screen output */
+    1 #SCR-MESSAGE          (A80)
+    1 #SCR-NEW-ACCOUNT      (A11)
+    1 #SCR-ACTION           (A1)    /* C=Create E=Exit
+    /* Subprogram response */
+    1 #VD-RESP-CODE         (N4)
+    1 #VD-RESP-TEXT         (A80)
+    1 #CR-RESP-CODE         (N4)
+    1 #CR-RESP-TEXT         (A80)
+    1 #CR-RESP-ADABAS       (N3)
+    1 #NEW-ACCOUNT-NUMBER   (A11)
+END-DEFINE
+
+* ── EOD Guard — block account creation during EOD ──────────
+IF #SYS-EOD-FLAG = 'Y'
+  MOVE 'SYSTEM EOD IN PROGRESS - ACCOUNT CREATION NOT PERMITTED'
+       TO #SCR-MESSAGE
+  INPUT USING MAP 'CBACM002'   /* Error display map
+  STOP
+END-IF
+
+* ── Display account creation map ───────────────────────────
+MOVE #SYS-USER-ID       TO #SCR-RM-ID      /* Default RM = logged-in user
+MOVE 'MN'               TO #SCR-STMT-CYCLE /* Default monthly statements
+MOVE 'EPPR'             TO #SCR-STMT-DELIVERY
+MOVE 'SOLE'             TO #SCR-MANDATE-TYPE
+MOVE 'N'                TO #SCR-TAX-FLAG
+
+REPEAT
+
+  INPUT USING MAP 'CBACM001'   /* Teller enters account details
+
+  /* PF3 / PF15 = Exit */
+  IF *PF-KEY = 'PF3' OR *PF-KEY = 'PF15'
+    ESCAPE BOTTOM
+  END-IF
+
+  /* Clear message for each interaction */
+  MOVE ' ' TO #SCR-MESSAGE
+
+  * ── Basic screen-level edits (before subprogram call) ────
+  IF #SCR-CUSTOMER-ID = ' '
+    MOVE 'CUSTOMER ID IS REQUIRED' TO #SCR-MESSAGE
+    REINPUT 'PLEASE CORRECT HIGHLIGHTED FIELD' MARK *#SCR-CUSTOMER-ID
+  END-IF
+
+  IF #SCR-PRODUCT-CODE = ' '
+    MOVE 'PRODUCT CODE IS REQUIRED' TO #SCR-MESSAGE
+    REINPUT 'PLEASE CORRECT HIGHLIGHTED FIELD' MARK *#SCR-PRODUCT-CODE
+  END-IF
+
+  * ── Step 1: Pre-validation via CBACVD01 ──────────────────
+  * CALL DEPTH: CBACP001(L1) -> CBACVD01(L2)
+  CALLNAT 'CBACVD01'
+    #SCR-CUSTOMER-ID
+    #SCR-PRODUCT-CODE
+    #SCR-ACCOUNT-TYPE
+    #SCR-CURRENCY
+    #SCR-BRANCH-CODE
+    #VD-RESP-CODE
+    #VD-RESP-TEXT
+
+  IF #VD-RESP-CODE NE 0
+    MOVE #VD-RESP-TEXT TO #SCR-MESSAGE
+    REINPUT 'VALIDATION FAILED - SEE MESSAGE' MARK *#SCR-CUSTOMER-ID
+  END-IF
+
+  /* PF5 = Confirm and create */
+  IF *PF-KEY NE 'PF5'
+    MOVE 'PRESS PF5 TO CONFIRM ACCOUNT CREATION, PF3 TO EXIT'
+         TO #SCR-MESSAGE
+    REINPUT #SCR-MESSAGE
+  END-IF
+
+  * ── Step 2: Account creation via CBACS002 ────────────────
+  * CALL DEPTH: CBACP001(L1) -> CBACS002(L2) -> [L3,L4 chain]
+  CALLNAT 'CBACS002'
+    #SCR-CUSTOMER-ID
+    #SCR-PRODUCT-CODE
+    #SCR-ACCOUNT-TYPE
+    #SCR-CURRENCY
+    #SCR-BRANCH-CODE
+    #SCR-RM-ID
+    #SCR-STMT-CYCLE
+    #SCR-STMT-DELIVERY
+    #SCR-INIT-DEPOSIT
+    #SCR-CURRENCY
+    #SCR-MANDATE-TYPE
+    #SCR-OD-LIMIT
+    #SCR-TAX-FLAG
+    #SCR-TDS-RATE
+    #NEW-ACCOUNT-NUMBER
+    #CR-RESP-CODE
+    #CR-RESP-TEXT
+    #CR-RESP-ADABAS
+
+  IF #CR-RESP-CODE NE 0
+    MOVE #CR-RESP-TEXT TO #SCR-MESSAGE
+    REINPUT 'ACCOUNT CREATION FAILED - SEE MESSAGE'
+  END-IF
+
+  /* Success */
+  MOVE #NEW-ACCOUNT-NUMBER TO #SCR-NEW-ACCOUNT
+  MOVE 'ACCOUNT CREATED SUCCESSFULLY: ' TO #SCR-MESSAGE
+  MOVE #NEW-ACCOUNT-NUMBER TO #SCR-MESSAGE(31:11)
+
+  INPUT USING MAP 'CBACM003'  /* Success confirmation map
+
+  ESCAPE BOTTOM
+
+END-REPEAT
+
+END

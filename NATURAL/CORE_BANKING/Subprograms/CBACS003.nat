@@ -1,0 +1,192 @@
+* ============================================================
+* NAME     : CBACS003
+* TYPE     : Subprogram (CALLNAT target)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBACS003
+* PURPOSE  : Account Update Subprogram. Updates non-financial fields
+*            on FILE 100 (ACCOUNT MASTER). Financial balance fields
+*            (AI, AJ, AK, AL, AX, AY, AZ) are NEVER updated here —
+*            those are exclusively managed by CBTXS001 (transaction
+*            post) within its own ET boundary.
+*            Enforces optimistic locking via RECORD-VERSION check.
+* PREDICT  : Custom inline PDA
+* CALLED BY: CBACP002 (account maintenance online driver)
+*            CBACP010 (dormancy setter — weekly batch MRDCW001)
+* CALLS    : CBACS001 (re-reads record with H lock before update)
+*            CMUTS007 (audit trail — before and after images)
+* DEPENDS  : GDA CMDAG001
+*            FILE 100 MRD-COREBKG-ACCTMSTR (UPDATE)
+*            FILE 010 MRD-SHARED-AUDIT (via CMUTS007)
+* ET/BT    : Issues ET on success. Issues BT on version conflict
+*            or ADABAS error. ET covers FILE 100 + FILE 010.
+* CALL DEPTH: Level 2. Calls CBACS001(L3), CMUTS007(L3).
+* ============================================================
+DEFINE DATA
+  GLOBAL USING CMDAG001
+  PARAMETER
+    1 #P-ACCOUNT-NUMBER    (A11)    /* IN: Account to update
+    1 #P-RECORD-VERSION    (P5)     /* IN: Version from prior CBACS001 read
+    /* Updatable fields (only send fields that are changing) */
+    1 #P-UPDATE-STATUS     (A1)     /* IN: Y=Update status field
+    1 #P-NEW-STATUS        (A2)     /* IN: New status (AC DM CL FR)
+    1 #P-FREEZE-REASON     (A4)     /* IN: Required if status=FR
+    1 #P-FREEZE-AUTH       (A8)     /* IN: Authoriser if status=FR
+    1 #P-UPDATE-RM         (A1)     /* IN: Y=Update RM field
+    1 #P-NEW-RM-ID         (A8)     /* IN: New RM ID
+    1 #P-UPDATE-STMT       (A1)     /* IN: Y=Update statement prefs
+    1 #P-NEW-STMT-CYCLE    (A2)     /* IN: New statement cycle
+    1 #P-NEW-STMT-DELIVERY (A4)     /* IN: New delivery method
+    1 #P-UPDATE-OD-LIMIT   (A1)     /* IN: Y=Update OD limit
+    1 #P-NEW-OD-LIMIT      (P15)    /* IN: New overdraft limit
+    1 #P-NEW-OD-EXPIRY     (P8)     /* IN: New OD expiry date
+    /* Output */
+    1 #P-RESPONSE-CODE     (N4)
+    1 #P-RESPONSE-TEXT     (A80)
+    1 #P-ADABAS-RESPONSE   (N3)
+  LOCAL
+    1 ACCT-VIEW VIEW OF MRD-COREBKG-ACCTMSTR
+      2 AA    /* ACCOUNT-NUMBER
+      2 AE    /* ACCOUNT-STATUS
+      2 AM    /* OVERDRAFT-LIMIT
+      2 AN    /* OVERDRAFT-EXPIRY-DATE
+      2 AU    /* RELATIONSHIP-MGR-ID
+      2 AR    /* STATEMENT-CYCLE
+      2 AS    /* STATEMENT-DELIVERY
+      2 BC    /* FREEZE-REASON-CODE
+      2 BD    /* FREEZE-DATE
+      2 BE    /* FREEZE-AUTHORISER
+      2 BF    /* DORMANCY-DATE
+      2 FC    /* LAST-UPDATED-BY
+      2 FD    /* LAST-UPDATED-TIMESTAMP
+      2 FE    /* LAST-UPDATED-PROGRAM
+      2 FF    /* RECORD-VERSION
+    /* Re-read for hold and version check */
+    1 #CBACA001-PDA PARAMETER USING CBACA001
+    1 #BEFORE-IMAGE   (A200)
+    1 #AFTER-IMAGE    (A200)
+    1 #AUD-RESP       (N4)
+    1 #AUD-TEXT       (A80)
+END-DEFINE
+
+* ── Step 1: Input validation ───────────────────────────────
+IF #P-ACCOUNT-NUMBER = ' '
+  MOVE 1010 TO #P-RESPONSE-CODE
+  MOVE 'ACCOUNT NUMBER IS BLANK' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+IF #P-RECORD-VERSION = 0
+  MOVE 1004 TO #P-RESPONSE-CODE
+  MOVE 'RECORD VERSION ZERO - READ ACCOUNT BEFORE UPDATE' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Step 2: Re-read with HOLD for version check ────────────
+* CALL DEPTH: CBACS003(L2) -> CBACS001(L3)
+MOVE #P-ACCOUNT-NUMBER  TO #CBACA001-PDA.#P-ACCOUNT-NUMBER
+MOVE 'H'                TO #CBACA001-PDA.#P-LOCK-MODE
+
+CALLNAT 'CBACS001'
+  #CBACA001-PDA.#P-ACCOUNT-NUMBER
+  #CBACA001-PDA.#P-LOCK-MODE
+  #CBACA001-PDA.#P-ACCOUNT-RECORD
+  #CBACA001-PDA.#P-RESPONSE-CODE
+  #CBACA001-PDA.#P-RESPONSE-TEXT
+  #CBACA001-PDA.#P-ADABAS-RESPONSE
+
+IF #CBACA001-PDA.#P-RESPONSE-CODE NE 0
+  MOVE #CBACA001-PDA.#P-RESPONSE-CODE TO #P-RESPONSE-CODE
+  MOVE #CBACA001-PDA.#P-RESPONSE-TEXT TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Step 3: Optimistic lock — version must match ───────────
+IF #CBACA001-PDA.#P-ACCOUNT-RECORD.#P-RECORD-VERSION NE #P-RECORD-VERSION
+  MOVE 1004 TO #P-RESPONSE-CODE
+  MOVE 'VERSION CONFLICT - RECORD CHANGED BY ANOTHER USER' TO #P-RESPONSE-TEXT
+  BT                              /* Release HOLD
+  ESCAPE ROUTINE
+END-IF
+
+* ── Step 4: Capture before image for audit ─────────────────
+MOVE #CBACA001-PDA.#P-ACCOUNT-RECORD.#P-ACCOUNT-STATUS TO #BEFORE-IMAGE(1:2)
+MOVE #CBACA001-PDA.#P-ACCOUNT-RECORD.#P-RELATIONSHIP-MGR-ID TO #BEFORE-IMAGE(3:8)
+
+* ── Step 5: Apply updates to ADABAS view ───────────────────
+FIND ACCT-VIEW WITH HOLD AA = #P-ACCOUNT-NUMBER
+  IF *ADABAS-RESPONSE NE 0
+    MOVE 9001 TO #P-RESPONSE-CODE
+    MOVE 'FILE 100 FIND-WITH-HOLD FAILED' TO #P-RESPONSE-TEXT
+    BT
+    ESCAPE ROUTINE
+  END-IF
+
+  IF #P-UPDATE-STATUS = 'Y'
+    MOVE #P-NEW-STATUS TO ACCT-VIEW.AE
+    IF #P-NEW-STATUS = 'FR'
+      MOVE #P-FREEZE-REASON   TO ACCT-VIEW.BC
+      MOVE #SYS-BUSINESS-DATE TO ACCT-VIEW.BD
+      MOVE #P-FREEZE-AUTH     TO ACCT-VIEW.BE
+    END-IF
+    IF #P-NEW-STATUS = 'DM'
+      MOVE #SYS-BUSINESS-DATE TO ACCT-VIEW.BF  /* Dormancy date
+    END-IF
+  END-IF
+
+  IF #P-UPDATE-RM = 'Y'
+    MOVE #P-NEW-RM-ID TO ACCT-VIEW.AU
+  END-IF
+
+  IF #P-UPDATE-STMT = 'Y'
+    MOVE #P-NEW-STMT-CYCLE    TO ACCT-VIEW.AR
+    MOVE #P-NEW-STMT-DELIVERY TO ACCT-VIEW.AS
+  END-IF
+
+  IF #P-UPDATE-OD-LIMIT = 'Y'
+    MOVE #P-NEW-OD-LIMIT  TO ACCT-VIEW.AM
+    MOVE #P-NEW-OD-EXPIRY TO ACCT-VIEW.AN
+  END-IF
+
+  /* Always update audit and version fields */
+  MOVE #SYS-USER-ID          TO ACCT-VIEW.FC
+  MOVE *TIMX                 TO ACCT-VIEW.FD
+  MOVE 'CBACS003'            TO ACCT-VIEW.FE
+  COMPUTE ACCT-VIEW.FF = #P-RECORD-VERSION + 1
+
+  UPDATE
+
+  IF *ADABAS-RESPONSE NE 0
+    MOVE *ADABAS-RESPONSE  TO #SYS-LAST-ADABAS-RESPONSE
+    MOVE 'CBACS003'        TO #SYS-LAST-ERROR-PROGRAM
+    MOVE 9001              TO #P-RESPONSE-CODE
+    MOVE 'FILE 100 UPDATE FAILED' TO #P-RESPONSE-TEXT
+    MOVE *ADABAS-RESPONSE  TO #P-ADABAS-RESPONSE
+    BT
+    ESCAPE ROUTINE
+  END-IF
+
+END-FIND
+
+* ── Step 6: Audit trail ────────────────────────────────────
+* CALL DEPTH: CBACS003(L2) -> CMUTS007(L3)
+MOVE #P-NEW-STATUS TO #AFTER-IMAGE(1:2)
+MOVE #P-NEW-RM-ID  TO #AFTER-IMAGE(3:8)
+
+CALLNAT 'CMUTS007'
+  'UPDT'
+  'ACCT'
+  #P-ACCOUNT-NUMBER
+  100
+  #BEFORE-IMAGE
+  #AFTER-IMAGE
+  'CBACS003'
+  #AUD-RESP
+  #AUD-TEXT
+
+* ── Step 7: Commit ─────────────────────────────────────────
+ET
+
+MOVE 0000 TO #P-RESPONSE-CODE
+MOVE 'ACCOUNT UPDATED SUCCESSFULLY' TO #P-RESPONSE-TEXT
+
+END

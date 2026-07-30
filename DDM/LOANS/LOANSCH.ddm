@@ -1,0 +1,112 @@
+* ============================================================
+* DDM NAME  : MRD-LOANS-LOANSCH
+* ADABAS    : FILE 205
+* PREDICT   : Library MRDDDMLIB
+* NUCLEUS   : ADANUC (DBID configured per LPAR via NATPARM)
+* OWNER     : LOANS (MRDLNLIB) — write access only
+* READERS   : PAYMENTS     (read-only, for EMI due-date lookup)
+*             REPORTING    (read-only, for schedule reports + statements)
+* RECORDS   : ~62,000,000 (2.1M loans × avg 30 instalments)
+* BLOCK SZ  : 4096 bytes
+* COMPRESS  : YES
+* RETENTION : Lifetime of loan + 7 years. Archived by MRDLA002.
+* CHANGED   : 1994-06-15  FILE 205 created with loan schedule records.
+*             2008-09-12  Added SQ TRANSACTION-ID linkage to FILE 150.
+*             2012-03-01  Added SP PENAL-AMOUNT field.
+*             2019-05-20  Added audit fields FA-FF for SOX compliance.
+* ============================================================
+*
+* DESIGN NOTE: One record per instalment per loan.
+*   SCHEDULE-KEY = LOAN-ACCOUNT-NUMBER (12) + INST-NO formatted 3 digits.
+*   e.g. Loan 000100101000001 instalment 001 → key "000100101000001001"
+*   This ensures all instalments for a loan are physically adjacent on disk
+*   (ADABAS ISN ordering via primary descriptor SU-LOAN-INST).
+* ============================================================
+
+DB=205
+
+FIELD=SA, 15, A, DE,U       /* SCHEDULE-KEY
+                              /* Unique descriptor = LA(12) + SC(3 zero-padded).
+                              /* Constructed by LNMOS002 at loan creation.
+                              /* Guarantees uniqueness and physical proximity.
+
+FIELD=SB, 12, A, DE         /* LOAN-ACCOUNT-NUMBER
+                              /* Descriptor. -> FILE 200 LA.
+                              /* FIND by SB retrieves all instalments for a loan.
+
+FIELD=SC,  3, N             /* INSTALLMENT-NUMBER
+                              /* Sequence: 1 to TENOR-MONTHS.
+
+FIELD=SD,  8, P, DE         /* DUE-DATE
+                              /* YYYYMMDD. Descriptor for batch date range reads.
+
+FIELD=SE, 15, P             /* EMI-AMOUNT
+                              /* Total monthly instalment (principal + interest).
+
+FIELD=SF, 15, P             /* PRINCIPAL-COMPONENT
+                              /* Principal portion of this instalment.
+
+FIELD=SG, 15, P             /* INTEREST-COMPONENT
+                              /* Interest portion of this instalment.
+                              /* SE = SF + SG (always true at creation).
+
+FIELD=SH, 15, P             /* OPENING-BALANCE
+                              /* Outstanding principal at start of this period.
+
+FIELD=SI, 15, P             /* CLOSING-BALANCE
+                              /* = SH - SF (principal balance after this EMI).
+
+FIELD=SJ,  8, P, NV         /* PAYMENT-DATE
+                              /* Actual date payment received. Zero if unpaid.
+
+FIELD=SK, 15, P, NV         /* PAID-AMOUNT
+                              /* Total amount actually paid (may differ from SE).
+
+FIELD=SL, 15, P, NV         /* PAID-PRINCIPAL
+                              /* Principal component of actual payment.
+
+FIELD=SM, 15, P, NV         /* PAID-INTEREST
+                              /* Interest component of actual payment.
+
+FIELD=SN,  2, A, DE,FI      /* SCHEDULE-STATUS
+                              /* PE = Pending  (due in future, not yet paid)
+                              /* PD = Paid     (fully paid on or before due date)
+                              /* OD = Overdue  (due date passed, not fully paid)
+                              /* PP = Part-Paid (partially paid)
+                              /* WV = Waived   (interest/charge waived by credit)
+                              /* FI: fixed-length for batch range reads.
+
+FIELD=SO,  3, N, NV         /* DAYS-OVERDUE
+                              /* Calculated daily by LNNPAP01. Zero if not OD.
+
+FIELD=SP, 15, P, NV         /* PENAL-AMOUNT
+                              /* Penal interest charged on this instalment.
+
+FIELD=SQ, 20, A, NV         /* PAYMENT-TRANSACTION-ID
+                              /* -> FILE 150 AA. Transaction that cleared this EMI.
+                              /* Set by LNRPS001 at time of repayment posting.
+
+FIELD=SR, 40, A, NV         /* WAIVER-REASON
+                              /* Populated if SN=WV. Requires credit authority.
+
+FIELD=SS,  8, A, NV         /* WAIVER-AUTHORISER
+                              /* User ID of officer who approved waiver.
+
+* -- AUDIT FIELDS (NC = non-compressed for fast retrieval) -----
+FIELD=FA,  8, A, NC         /* CREATED-BY-USER-ID
+FIELD=FB, 26, A, NC         /* CREATED-TIMESTAMP
+FIELD=FC,  8, A, NC         /* LAST-UPDATED-BY
+FIELD=FD, 26, A, NC         /* LAST-UPDATED-TIMESTAMP
+FIELD=FE,  8, A, NC         /* LAST-UPDATED-PROGRAM
+FIELD=FF,  5, P, NC         /* RECORD-VERSION
+
+* -- SUPERDESCRIPTORS -------------------------------------------
+SUPER=SU-LOAN-INST,    SB(1,12), SC(1,3)
+  /* Primary access path: all instalments for a loan in sequence order.
+  /* Used by LNRPS001 (repayment), LNIQP001 (inquiry), LNIAP010 (accrual).
+
+SUPER=SU-DUE-STATUS,   SD(1,8), SN(1,2)
+  /* Due date + status. Used by MRDLR001 to find all EMIs due today.
+
+SUPER=SU-STATUS-LOAN,  SN(1,2), SB(1,12)
+  /* Overdue instalments per loan. Used by LNNPAP01 NPA classification.

@@ -1,0 +1,174 @@
+* ============================================================
+* NAME     : CBACVD01
+* TYPE     : Subprogram (CALLNAT target)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBACVD01
+* PURPOSE  : Account Validation Subprogram. Validates input data
+*            before any account creation or update. Called as the
+*            FIRST step in CBACS002 (account create) and CBACP001
+*            (online driver) before any ADABAS writes.
+*            Validates: customer existence + KYC, product code,
+*            account type + currency combination, branch existence.
+* CALLED BY: CBACS002 (account create — mandatory first call)
+*            CBACP001 (online driver — pre-validation before CBACS002)
+* CALLS    : CBACS001 (reads FILE 100 to check duplicate account)
+*            Does NOT call CMUTS007 — validation does not audit
+* DEPENDS  : GDA CMDAG001
+*            FILE 050 MRD-SHARED-CUSTMSTR (read — customer check)
+*            FILE 110 MRD-COREBKG-PRODUCT (read — product check)
+*            FILE 035 MRD-SHARED-BRANCH (read — branch check)
+* ADABAS   : Three FIND operations (050, 110, 035) — read-only
+* ET/BT    : None. Pure validation — no ADABAS writes.
+* CALL DEPTH: Level 3 (called by CBACS002 at Level 2)
+* ============================================================
+DEFINE DATA
+  GLOBAL USING CMDAG001
+  PARAMETER
+    1 #P-CUSTOMER-ID        (A10)   /* IN: Must exist in FILE 050
+    1 #P-PRODUCT-CODE       (A6)    /* IN: Must exist in FILE 110
+    1 #P-ACCOUNT-TYPE       (A4)    /* IN: Must match product type
+    1 #P-CURRENCY-CODE      (A3)    /* IN: Must be valid ISO 4217
+    1 #P-BRANCH-CODE        (A4)    /* IN: Must exist in FILE 035
+    1 #P-RESPONSE-CODE      (N4)    /* OUT: 0=Valid, non-zero=invalid
+    1 #P-RESPONSE-TEXT      (A80)   /* OUT: Validation failure reason
+  LOCAL
+    1 CUST-VIEW VIEW OF MRD-SHARED-CUSTMSTR
+      2 AA    /* CUSTOMER-ID
+      2 AP    /* CUSTOMER-STATUS
+      2 AW    /* KYC-STATUS
+    1 PROD-VIEW VIEW OF MRD-COREBKG-PRODUCT
+      2 PA    /* PRODUCT-CODE
+      2 PB    /* PRODUCT-STATUS
+      2 PC    /* ALLOWED-ACCOUNT-TYPE
+      2 PD    /* ALLOWED-CURRENCIES  (MU field)
+    1 BRNCH-VIEW VIEW OF MRD-SHARED-BRANCH
+      2 BA    /* BRANCH-CODE
+      2 BB    /* BRANCH-STATUS
+    1 #CUST-FOUND     (A1)
+    1 #PROD-FOUND     (A1)
+    1 #BRNCH-FOUND    (A1)
+    1 #VALID-CCY      (A1)
+    /* Valid currencies list (sourced from FILE 025 in production) */
+    1 #VALID-CCY-LIST (A3/1:50)   /* Array of valid ISO codes
+END-DEFINE
+
+MOVE 0    TO #P-RESPONSE-CODE
+MOVE 'N'  TO #CUST-FOUND
+MOVE 'N'  TO #PROD-FOUND
+MOVE 'N'  TO #BRNCH-FOUND
+MOVE 'N'  TO #VALID-CCY
+
+* ── Validation 1: Customer must exist and be KYC-clear ─────
+IF #P-CUSTOMER-ID = ' '
+  MOVE 2001 TO #P-RESPONSE-CODE
+  MOVE 'CUSTOMER ID IS BLANK' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+FIND CUST-VIEW WITH AA = #P-CUSTOMER-ID
+  MOVE 'Y' TO #CUST-FOUND
+  IF CUST-VIEW.AP NE 'AC'
+    MOVE 2002 TO #P-RESPONSE-CODE
+    MOVE 'CUSTOMER IS NOT ACTIVE STATUS' TO #P-RESPONSE-TEXT
+    ESCAPE ROUTINE
+  END-IF
+  IF CUST-VIEW.AW = 'FL' OR CUST-VIEW.AW = 'EX'
+    MOVE 2003 TO #P-RESPONSE-CODE
+    MOVE 'CUSTOMER KYC FAILED OR EXPIRED - ACCOUNT OPEN BLOCKED' TO #P-RESPONSE-TEXT
+    ESCAPE ROUTINE
+  END-IF
+  IF CUST-VIEW.AW = 'PE'
+    MOVE 2004 TO #P-RESPONSE-CODE
+    MOVE 'CUSTOMER KYC PENDING - ACCOUNT OPEN BLOCKED' TO #P-RESPONSE-TEXT
+    ESCAPE ROUTINE
+  END-IF
+END-FIND
+
+IF #CUST-FOUND = 'N'
+  MOVE 2005 TO #P-RESPONSE-CODE
+  MOVE 'CUSTOMER NOT FOUND IN FILE 050' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Validation 2: Product code must be active ───────────────
+IF #P-PRODUCT-CODE = ' '
+  MOVE 2010 TO #P-RESPONSE-CODE
+  MOVE 'PRODUCT CODE IS BLANK' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+FIND PROD-VIEW WITH PA = #P-PRODUCT-CODE
+  MOVE 'Y' TO #PROD-FOUND
+  IF PROD-VIEW.PB NE 'AC'
+    MOVE 2011 TO #P-RESPONSE-CODE
+    MOVE 'PRODUCT IS NOT ACTIVE' TO #P-RESPONSE-TEXT
+    ESCAPE ROUTINE
+  END-IF
+  IF PROD-VIEW.PC NE #P-ACCOUNT-TYPE
+    MOVE 2012 TO #P-RESPONSE-CODE
+    MOVE 'ACCOUNT TYPE DOES NOT MATCH PRODUCT DEFINITION' TO #P-RESPONSE-TEXT
+    ESCAPE ROUTINE
+  END-IF
+END-FIND
+
+IF #PROD-FOUND = 'N'
+  MOVE 2013 TO #P-RESPONSE-CODE
+  MOVE 'PRODUCT CODE NOT FOUND IN FILE 110' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Validation 3: Account type must be valid ────────────────
+IF #P-ACCOUNT-TYPE NE 'CURR' AND #P-ACCOUNT-TYPE NE 'SAVG'
+   AND #P-ACCOUNT-TYPE NE 'FIXD' AND #P-ACCOUNT-TYPE NE 'CALL'
+   AND #P-ACCOUNT-TYPE NE 'FCCY' AND #P-ACCOUNT-TYPE NE 'ODRFT'
+  MOVE 2020 TO #P-RESPONSE-CODE
+  MOVE 'INVALID ACCOUNT TYPE' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Validation 4: Currency must be valid ISO 4217 ───────────
+/* Production reads valid list from FILE 025. Simplified here:
+IF #P-CURRENCY-CODE = ' '
+  MOVE 2030 TO #P-RESPONSE-CODE
+  MOVE 'CURRENCY CODE IS BLANK' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+IF #P-ACCOUNT-TYPE = 'CURR' OR #P-ACCOUNT-TYPE = 'SAVG'
+   OR #P-ACCOUNT-TYPE = 'FIXD'
+  IF #P-CURRENCY-CODE NE 'USD' AND #P-CURRENCY-CODE NE 'GBP'
+     AND #P-CURRENCY-CODE NE 'EUR' AND #P-CURRENCY-CODE NE 'INR'
+     AND #P-CURRENCY-CODE NE 'SGD' AND #P-CURRENCY-CODE NE 'AED'
+    /* In production: full ISO table lookup from FILE 025 */
+    MOVE 2031 TO #P-RESPONSE-CODE
+    MOVE 'CURRENCY CODE NOT IN APPROVED LIST' TO #P-RESPONSE-TEXT
+    ESCAPE ROUTINE
+  END-IF
+END-IF
+
+* ── Validation 5: Branch must exist and be active ───────────
+IF #P-BRANCH-CODE = ' '
+  MOVE 2040 TO #P-RESPONSE-CODE
+  MOVE 'BRANCH CODE IS BLANK' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+FIND BRNCH-VIEW WITH BA = #P-BRANCH-CODE
+  MOVE 'Y' TO #BRNCH-FOUND
+  IF BRNCH-VIEW.BB NE 'AC'
+    MOVE 2041 TO #P-RESPONSE-CODE
+    MOVE 'BRANCH IS NOT ACTIVE' TO #P-RESPONSE-TEXT
+    ESCAPE ROUTINE
+  END-IF
+END-FIND
+
+IF #BRNCH-FOUND = 'N'
+  MOVE 2042 TO #P-RESPONSE-CODE
+  MOVE 'BRANCH NOT FOUND IN FILE 035' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── All validations passed ──────────────────────────────────
+MOVE 0000 TO #P-RESPONSE-CODE
+MOVE 'ALL VALIDATIONS PASSED' TO #P-RESPONSE-TEXT
+
+END

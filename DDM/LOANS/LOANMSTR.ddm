@@ -1,0 +1,254 @@
+* ============================================================
+* DDM NAME  : MRD-LOANS-LOANMSTR
+* ADABAS    : FILE 200
+* PREDICT   : Library MRDDDMLIB
+* NUCLEUS   : ADANUC (DBID configured per LPAR via NATPARM)
+* OWNER     : LOANS (MRDLNLIB) — write access only
+* READERS   : CORE_BANKING (read-only, for BJ linked-loan-account linkage)
+*             PAYMENTS     (read-only, for repayment instruction routing)
+*             REPORTING    (read-only, for portfolio + NPA reports)
+*             FRAUD        (read-only, for exposure scoring)
+* RECORDS   : ~2,100,000 (active + settled + written-off over 20 years)
+* BLOCK SZ  : 6144 bytes
+* COMPRESS  : YES (default ADABAS compression)
+* RETENTION : Permanent. WO=WrittenOff and ST=Settled loans never deleted.
+*             Archived to FILE 600 after 7 years (MRDLA001 archive batch).
+* CHANGED   : 1994-06-15  FILE 200 created — migrated from legacy COBOL.
+*             2001-03-22  Added MA NPA-FLAG, MB NPA-DATE post Basel-II mandate.
+*             2005-07-18  Added ME-MF COLLATERAL fields.
+*             2008-09-12  Added LQ REPAYMENT-DAY, LR NEXT-DUE-DATE.
+*             2010-02-01  Added MK PENAL-INTEREST-RATE per RBI circular.
+*             2014-11-01  Added LW-LY overdue detail fields.
+*             2017-04-10  Added MM-MN RESTRUCTURE fields (IND-AS 109).
+*             2019-05-20  Added FF RECORD-VERSION for optimistic locking.
+*             2023-01-15  Added MP WRITE-OFF-AMOUNT for provisioning reports.
+* ============================================================
+*
+* FIELD DEFINITION TABLE (FDT)
+* Fmt: A=Alpha P=Packed N=Numeric B=Binary
+* Opt: D=Descriptor U=Unique SD=Subdesc SU=Superdesc
+*      MU=MultiValue PE=PeriodicGroup NC=NonCompressed
+*      NV=NullValue FI=FixedLength
+* ============================================================
+
+DB=200
+
+FIELD=LA, 12, A, DE,U       /* LOAN-ACCOUNT-NUMBER
+                              /* Unique descriptor. Format BBBBTTTLLLLLC.
+                              /* B=Branch(4) T=Type(3) L=Seq(5) C=CheckDigit.
+                              /* Luhn mod-10 validated by LNMOVD01.
+
+FIELD=LB, 10, A, DE         /* CUSTOMER-ID
+                              /* Descriptor. -> FILE 050 AA.
+                              /* One customer may have multiple loans.
+
+FIELD=LC,  6, A, DE         /* PRODUCT-CODE
+                              /* -> FILE 110 PA (Loan Product Master).
+                              /* e.g. HOMLN CARLOAN PERSLN EDLOAN AGRILOAN
+
+FIELD=LD,  4, A, DE         /* LOAN-TYPE
+                              /* TERM  = Term loan (fixed schedule)
+                              /* REVO  = Revolving credit facility
+                              /* MORT  = Mortgage / home loan
+                              /* VEHI  = Vehicle / auto loan
+                              /* PERS  = Personal loan (unsecured)
+                              /* EDUC  = Education loan
+                              /* AGRI  = Agricultural loan
+                              /* MSME  = MSME business loan
+                              /* CRED  = Credit card facility
+
+FIELD=LE,  2, A, DE,FI      /* LOAN-STATUS
+                              /* SA = Sanctioned (not yet disbursed)
+                              /* DI = Disbursed (partial or full)
+                              /* AC = Active (fully disbursed, repaying)
+                              /* OD = Overdue (1-89 days past due)
+                              /* NP = NPA (90+ days past due, classified)
+                              /* ST = Settled (fully repaid)
+                              /* WO = WrittenOff (irrecoverable, provisioned 100%)
+                              /* RS = Restructured (modified repayment terms)
+                              /* FI: fixed-length for batch range reads.
+
+FIELD=LF,  8, P, DE         /* SANCTION-DATE
+                              /* YYYYMMDD packed. Date loan was approved.
+
+FIELD=LG,  8, P, NV         /* FIRST-DISBURSEMENT-DATE
+                              /* Zero (null-suppressed) if not yet disbursed.
+
+FIELD=LH,  8, P, DE         /* MATURITY-DATE
+                              /* Expected final repayment date.
+                              /* Recalculated on restructure.
+
+FIELD=LI, 15, P             /* SANCTIONED-AMOUNT
+                              /* Original approved loan amount. Signed packed 13.2.
+                              /* Never changes post-sanction without fresh CAB.
+
+FIELD=LJ, 15, P, NV         /* OUTSTANDING-PRINCIPAL
+                              /* Running balance. Reduced by each repayment.
+                              /* Written by LNRPS001 only.
+
+FIELD=LK, 15, P, NV         /* TOTAL-DISBURSED-AMOUNT
+                              /* Cumulative disbursements (multi-tranche loans).
+
+FIELD=LL,  7, P, NV         /* INTEREST-RATE
+                              /* Format 5.2 packed. e.g. 10.50% stored as 01050.
+                              /* For variable-rate loans: current effective rate.
+                              /* Updated by LNIAP020 (rate reset batch).
+
+FIELD=LM,  1, A             /* RATE-TYPE
+                              /* F = Fixed (rate locked for full tenor)
+                              /* V = Variable (linked to base rate / MCLR)
+
+FIELD=LN, 15, P, NV         /* EMI-AMOUNT
+                              /* Monthly instalment (principal + interest).
+                              /* Recalculated by LNSCH001 on rate change.
+
+FIELD=LO,  3, N             /* TENOR-MONTHS
+                              /* Original approved tenor in months.
+
+FIELD=LP,  3, N             /* INSTALLMENTS-TOTAL
+                              /* = TENOR-MONTHS for most loan types.
+
+FIELD=LQ,  3, N             /* INSTALLMENTS-PAID
+                              /* Count of instalments fully paid.
+
+FIELD=LR,  3, N             /* INSTALLMENTS-OVERDUE
+                              /* Count of EMIs where NEXT-DUE-DATE passed.
+
+FIELD=LS,  2, N             /* REPAYMENT-DAY-OF-MONTH
+                              /* Fixed day: 1-28. EMI due each month on this day.
+
+FIELD=LT,  8, P, DE,NV      /* NEXT-DUE-DATE
+                              /* YYYYMMDD. Next EMI due date.
+                              /* Descriptor: MRDLR001 batch reads by this field.
+
+FIELD=LU,  8, P, NV         /* LAST-PAYMENT-DATE
+                              /* Date of most recent repayment received.
+
+FIELD=LV, 15, P, NV         /* TOTAL-PRINCIPAL-PAID
+                              /* Cumulative principal repaid since disbursement.
+
+FIELD=LW, 15, P, NV         /* TOTAL-INTEREST-PAID
+                              /* Cumulative interest collected.
+
+FIELD=LX, 15, P, NV         /* OVERDUE-PRINCIPAL
+                              /* Principal component of overdue EMIs.
+
+FIELD=LY, 15, P, NV         /* OVERDUE-INTEREST
+                              /* Interest component of overdue EMIs.
+
+FIELD=LZ, 15, P, NV         /* OVERDUE-CHARGES
+                              /* Penal interest + late fees accumulated.
+
+* -- NPA CLASSIFICATION FIELDS ----------------------------------
+FIELD=MA,  1, A, DE         /* NPA-CATEGORY
+                              /* N = Normal (performing)
+                              /* S = Sub-Standard  (NPA < 12 months)
+                              /* D = Doubtful      (NPA 12-36 months)
+                              /* L = Loss          (NPA > 36 months or fraud)
+                              /* Written exclusively by LNNPAP01 (NPA batch).
+
+FIELD=MB,  8, P, NV         /* NPA-CLASSIFICATION-DATE
+                              /* Date loan first moved to NPA status.
+
+FIELD=MC,  5, P, NV         /* NPA-PROVISION-PERCENT
+                              /* Format 3.2. Provisioning % per RBI norms.
+                              /* S=10%, D=20-100%, L=100%.
+
+FIELD=MD, 15, P, NV         /* NPA-PROVISION-AMOUNT
+                              /* Calculated provision amount for balance sheet.
+
+FIELD=ME,  3, N             /* OVERDUE-DAYS
+                              /* Days since oldest unpaid EMI due date.
+                              /* Updated daily by LNNPAP01.
+
+* -- LINKED ACCOUNTS AND COLLATERAL ----------------------------
+FIELD=MF, 11, A, DE,NV      /* LINKED-CASA-ACCOUNT
+                              /* -> FILE 100 AA. Primary debit account for EMI.
+                              /* Also in FILE 100 BJ (back-reference).
+
+FIELD=MG, 10, A, NV         /* COLLATERAL-CODE
+                              /* -> FILE 210 CA (Collateral Register).
+
+FIELD=MH, 15, P, NV         /* COLLATERAL-VALUE
+                              /* Market value as at last valuation date.
+
+FIELD=MI,  8, P, NV         /* COLLATERAL-VALUATION-DATE
+
+FIELD=MJ,  4, A, DE         /* PROCESSING-BRANCH
+                              /* -> FILE 035. Originating branch.
+
+FIELD=MK,  8, A, DE         /* LOAN-OFFICER-ID
+                              /* Natural Security user ID of sanctioning officer.
+
+FIELD=ML,  3, A             /* CURRENCY-CODE
+                              /* ISO 4217 alpha-3. Normally INR for domestic.
+
+* -- ACCRUAL AND PENDING GL -------------------------------------
+FIELD=MM, 15, P, NV         /* INTEREST-ACCRUED-PENDING
+                              /* Daily accrual accumulated, not yet posted to GL.
+                              /* Posted to FILE 105 by MRDLI001 (EOD accrual job).
+                              /* Zeroed after each GL posting.
+
+FIELD=MN,  5, P, NV         /* PENAL-INTEREST-RATE
+                              /* Format 3.2 packed. Extra rate on overdue amount.
+                              /* e.g. 2.00% per annum above contractual rate.
+
+FIELD=MO, 15, P, NV         /* TOTAL-CHARGES-LEVIED
+                              /* Cumulative processing + late + penal charges.
+
+* -- RESTRUCTURE FIELDS (IND-AS 109 / RBI Circular 2017) -------
+FIELD=MP,  1, A             /* RESTRUCTURE-FLAG  Y/N
+
+FIELD=MQ,  8, P, NV         /* RESTRUCTURE-DATE
+
+FIELD=MR,  3, N, NV         /* RESTRUCTURE-COUNT
+                              /* Times loan has been restructured. >2 = Loss.
+
+FIELD=MS, 15, P, NV         /* RESTRUCTURE-PRINCIPAL-OUTSTANDING
+                              /* Outstanding at time of restructure (audit trail).
+
+* -- WRITE-OFF FIELDS -------------------------------------------
+FIELD=MT,  8, P, NV         /* WRITE-OFF-DATE
+
+FIELD=MU, 15, P, NV         /* WRITE-OFF-AMOUNT
+                              /* Amount written off. Retained for recovery tracking.
+
+FIELD=MV,  8, A, NV         /* WRITE-OFF-AUTHORISER
+                              /* User ID of approving authority (Head Credit).
+
+* -- PERIODIC GROUP: DISBURSEMENT TRANCHES (max 6) -------------
+FIELD=DA, PE(6)             /* Begin periodic group DISBURSEMENT-TRANCHES
+FIELD=DB,  8, P, NV         /* TRANCHE-DATE
+FIELD=DC, 15, P, NV         /* TRANCHE-AMOUNT
+FIELD=DD, 20, A, NV         /* TRANCHE-TRANSACTION-ID -> FILE 150 AA
+FIELD=DE,  2, A, NV         /* TRANCHE-STATUS  PD=Pending DI=Disbursed CN=Cancelled
+FIELD=DF, 40, A, NV         /* TRANCHE-NARRATIVE
+FIELD=DZ, PE                /* End periodic group
+
+* -- AUDIT FIELDS (NC = non-compressed for fast retrieval) -----
+FIELD=FA,  8, A, NC         /* CREATED-BY-USER-ID
+FIELD=FB, 26, A, NC         /* CREATED-TIMESTAMP  ISO8601
+FIELD=FC,  8, A, NC         /* LAST-UPDATED-BY
+FIELD=FD, 26, A, NC         /* LAST-UPDATED-TIMESTAMP
+FIELD=FE,  8, A, NC         /* LAST-UPDATED-PROGRAM
+FIELD=FF,  5, P, NC         /* RECORD-VERSION  (optimistic lock counter)
+FIELD=FG,  4, A, NC         /* SYSTEM-OF-ORIGIN  NATV MIGR BULK
+
+* -- SUPERDESCRIPTORS -------------------------------------------
+SUPER=SU-CUST-STATUS,  LB(1,10), LE(1,2)
+  /* All loans per customer by status. Used by relationship + exposure reports.
+
+SUPER=SU-BRANCH-TYPE,  MJ(1,4), LD(1,4)
+  /* Branch loan book by type. Used by RPDLP021 branch portfolio report.
+
+SUPER=SU-STATUS-DUE,   LE(1,2), LT(1,8)
+  /* Status + next due date. Used by MRDLR001 batch EMI collection.
+
+SUPER=SU-MATURITY,     LE(1,2), LH(1,8)
+  /* Active loans by maturity. Used by ALM (asset-liability management) reports.
+
+SUPER=SU-NPA-CATEGORY, MA(1,1), MB(1,8)
+  /* NPA category + classification date. Used by LNNPAP01 provisioning batch.
+
+SUPER=SU-OFFICER-STATUS, MK(1,8), LE(1,2)
+  /* Loan officer book by status. Used by RPDLP031 officer performance report.

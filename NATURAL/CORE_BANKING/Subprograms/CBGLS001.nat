@@ -1,0 +1,163 @@
+* ============================================================
+* NAME     : CBGLS001
+* TYPE     : Subprogram (CALLNAT target)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBGLS001
+* PURPOSE  : GL Posting Subprogram. Posts a double-entry (debit +
+*            credit) to FILE 105 (GL MASTER). Called by CBTXS001
+*            for every financial transaction, and by CBACS002 for
+*            account opening entries. Single point of GL writes —
+*            no other program writes FILE 105 directly.
+* CALLED BY: CBTXS001 (transaction post — most frequent, ~6.8M/day)
+*            CBACS002 (account creation — opening GL entry)
+*            CBICP002 (interest posting batch)
+*            CBICP004 (charges batch)
+* CALLS    : CMUTS007 (audit trail — SOX requirement for all GL posts)
+* DEPENDS  : GDA CMDAG001
+*            FILE 105 MRD-COREBKG-GLMASTER (UPDATE on existing, STORE if new)
+*            FILE 010 MRD-SHARED-AUDIT (via CMUTS007)
+* ET/BT    : Does NOT issue ET. Caller (CBTXS001) owns the ET boundary.
+*            If GL STORE/UPDATE fails: sets error response, caller issues BT.
+* CALL DEPTH: Level 3 (called by CBTXS001 at Level 2/3 within chain)
+* ============================================================
+DEFINE DATA
+  GLOBAL USING CMDAG001
+  PARAMETER
+    1 #P-ENTITY-KEY         (A20)   /* IN: Account/loan number causing GL entry
+    1 #P-ENTITY-TYPE        (A4)    /* IN: ACCT LOAN PYMT
+    1 #P-GL-ACCOUNT-DR      (A12)   /* IN: GL account to debit -> FILE 105 GA
+    1 #P-GL-ACCOUNT-CR      (A12)   /* IN: GL account to credit -> FILE 105 GA
+    1 #P-AMOUNT             (P15)   /* IN: Amount (always positive)
+    1 #P-CURRENCY           (A3)    /* IN: ISO 4217
+    1 #P-GL-TXN-TYPE        (A4)    /* IN: ACOP TXNP INTP CHRG LOAN REVR
+    1 #P-VALUE-DATE         (P8)    /* IN: YYYYMMDD
+    1 #P-RESPONSE-CODE      (N4)    /* OUT
+    1 #P-RESPONSE-TEXT      (A80)   /* OUT
+    1 #P-GL-ENTRY-REFERENCE (A12)   /* OUT: Reference stored back in FILE 150
+  LOCAL
+    1 GL-VIEW VIEW OF MRD-COREBKG-GLMASTER
+      2 GA    /* GL-ACCOUNT-CODE
+      2 GC    /* CURRENCY
+      2 GD    /* DEBIT-BALANCE
+      2 GE    /* CREDIT-BALANCE
+      2 GF    /* PERIOD-CODE
+      2 GI    /* LAST-UPDATED-DATE
+      2 GJ    /* LAST-UPDATED-TIME
+      2 GK    /* POSTING-USER-ID
+    1 #PERIOD-CODE          (A6)    /* YYYYMM derived from value date
+    1 #DR-ISN               (P10)
+    1 #CR-ISN               (P10)
+    1 #DR-FOUND             (A1)
+    1 #CR-FOUND             (A1)
+    1 #AUD-RESP             (N4)
+    1 #AUD-TEXT             (A80)
+    1 #GL-REF-COUNTER       (N6)
+END-DEFINE
+
+* ── Derive period code from value date ─────────────────────
+MOVE #P-VALUE-DATE(1:6) TO #PERIOD-CODE   /* YYYYMM from YYYYMMDD
+
+* ── Generate GL entry reference ────────────────────────────
+/* Format: GLYYYYMMDD+N(6) — unique within day
+MOVE #SYS-BUSINESS-DATE TO #P-GL-ENTRY-REFERENCE(1:8)
+COMPUTE #GL-REF-COUNTER = *ISN           /* Use ADABAS ISN as sequence
+MOVE EDIT(#GL-REF-COUNTER,'999999') TO #P-GL-ENTRY-REFERENCE(9:6)
+MOVE 'GL'  TO #P-GL-ENTRY-REFERENCE(7:2) /* Overwrite with GL prefix
+
+* ── Validate GL accounts exist ─────────────────────────────
+IF #P-GL-ACCOUNT-DR = ' ' OR #P-GL-ACCOUNT-CR = ' '
+  MOVE 1008 TO #P-RESPONSE-CODE
+  MOVE 'GL ACCOUNT CODE IS BLANK' TO #P-RESPONSE-TEXT
+  ESCAPE ROUTINE
+END-IF
+
+* ── Post DEBIT leg ─────────────────────────────────────────
+MOVE 'N' TO #DR-FOUND
+
+FIND GL-VIEW WITH HOLD GA = #P-GL-ACCOUNT-DR AND GF = #PERIOD-CODE
+  MOVE 'Y' TO #DR-FOUND
+  MOVE *ISN TO #DR-ISN
+  COMPUTE GL-VIEW.GD = GL-VIEW.GD + #P-AMOUNT
+  MOVE #SYS-BUSINESS-DATE  TO GL-VIEW.GI
+  MOVE *TIMX(9:6)           TO GL-VIEW.GJ
+  MOVE #SYS-USER-ID         TO GL-VIEW.GK
+  UPDATE
+  IF *ADABAS-RESPONSE NE 0
+    MOVE *ADABAS-RESPONSE  TO #SYS-LAST-ADABAS-RESPONSE
+    MOVE 'CBGLS001'        TO #SYS-LAST-ERROR-PROGRAM
+    MOVE 9003              TO #P-RESPONSE-CODE
+    MOVE 'GL FILE 105 DEBIT UPDATE FAILED' TO #P-RESPONSE-TEXT
+    ESCAPE ROUTINE
+  END-IF
+END-FIND
+
+IF #DR-FOUND = 'N'
+  /* GL account+period not found — create new period record */
+  MOVE #P-GL-ACCOUNT-DR    TO GL-VIEW.GA
+  MOVE #P-CURRENCY          TO GL-VIEW.GC
+  MOVE #P-AMOUNT            TO GL-VIEW.GD  /* First debit
+  MOVE 0                    TO GL-VIEW.GE
+  MOVE #PERIOD-CODE         TO GL-VIEW.GF
+  MOVE #SYS-BUSINESS-DATE   TO GL-VIEW.GI
+  MOVE *TIMX(9:6)           TO GL-VIEW.GJ
+  MOVE #SYS-USER-ID         TO GL-VIEW.GK
+  STORE GL-VIEW
+  IF *ADABAS-RESPONSE NE 0
+    MOVE 9003 TO #P-RESPONSE-CODE
+    MOVE 'GL FILE 105 DEBIT STORE FAILED' TO #P-RESPONSE-TEXT
+    ESCAPE ROUTINE
+  END-IF
+END-IF
+
+* ── Post CREDIT leg ────────────────────────────────────────
+MOVE 'N' TO #CR-FOUND
+
+FIND GL-VIEW WITH HOLD GA = #P-GL-ACCOUNT-CR AND GF = #PERIOD-CODE
+  MOVE 'Y' TO #CR-FOUND
+  COMPUTE GL-VIEW.GE = GL-VIEW.GE + #P-AMOUNT
+  MOVE #SYS-BUSINESS-DATE  TO GL-VIEW.GI
+  MOVE *TIMX(9:6)           TO GL-VIEW.GJ
+  MOVE #SYS-USER-ID         TO GL-VIEW.GK
+  UPDATE
+  IF *ADABAS-RESPONSE NE 0
+    MOVE 9003 TO #P-RESPONSE-CODE
+    MOVE 'GL FILE 105 CREDIT UPDATE FAILED' TO #P-RESPONSE-TEXT
+    ESCAPE ROUTINE
+  END-IF
+END-FIND
+
+IF #CR-FOUND = 'N'
+  MOVE #P-GL-ACCOUNT-CR    TO GL-VIEW.GA
+  MOVE #P-CURRENCY          TO GL-VIEW.GC
+  MOVE 0                    TO GL-VIEW.GD
+  MOVE #P-AMOUNT            TO GL-VIEW.GE  /* First credit
+  MOVE #PERIOD-CODE         TO GL-VIEW.GF
+  MOVE #SYS-BUSINESS-DATE   TO GL-VIEW.GI
+  MOVE *TIMX(9:6)           TO GL-VIEW.GJ
+  MOVE #SYS-USER-ID         TO GL-VIEW.GK
+  STORE GL-VIEW
+  IF *ADABAS-RESPONSE NE 0
+    MOVE 9003 TO #P-RESPONSE-CODE
+    MOVE 'GL FILE 105 CREDIT STORE FAILED' TO #P-RESPONSE-TEXT
+    ESCAPE ROUTINE
+  END-IF
+END-IF
+
+* ── Audit GL posting ───────────────────────────────────────
+* CALL DEPTH: CBGLS001(L3) -> CMUTS007(L4)
+CALLNAT 'CMUTS007'
+  'POST'
+  'GL  '
+  #P-GL-ENTRY-REFERENCE
+  105
+  #P-GL-ACCOUNT-DR
+  #P-GL-ACCOUNT-CR
+  'CBGLS001'
+  #AUD-RESP
+  #AUD-TEXT
+
+/* Caller issues ET — we do not ET here */
+MOVE 0000 TO #P-RESPONSE-CODE
+MOVE 'GL DOUBLE ENTRY POSTED SUCCESSFULLY' TO #P-RESPONSE-TEXT
+
+END

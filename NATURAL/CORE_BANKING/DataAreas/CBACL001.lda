@@ -1,0 +1,162 @@
+* ============================================================
+* NAME     : CBACL001
+* TYPE     : Local Data Area (LDA)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBACL001
+* PURPOSE  : Working-storage image of FILE 100 (ACCOUNT MASTER).
+*            INCLUDE'd by any program that reads or writes accounts.
+*            Field names mirror DDM ACCTMSTR.ddm exactly.
+* PREDICT  : Registered under MRDDDMLIB
+* USED BY  : CBACP001, CBACP002, CBACS001, CBACS002, CBACS003,
+*            CBACVD01, CBTXS001, CBTXVD01, CBTXP010
+* CHANGED  : 1994-02-10  Initial creation
+*            2003-11-14  Added OFAC-FLAG after compliance mandate
+*            2015-06-01  Added LINKED-LOAN-ACCOUNT field
+*            2020-03-19  Added FREEZE fields
+*            2022-09-08  Added ACCRUED-CHARGES-WAIVER working field
+* CAUTION  : Financial balance fields (CURRENT-BALANCE through
+*            LIEN-AMOUNT) are SIGNED PACKED 13-digit 2-decimal.
+*            Never derive account balance by summing FILE 150.
+*            Always read AI (CURRENT-BALANCE) from FILE 100 direct.
+* ============================================================
+DEFINE DATA LOCAL
+
+  1 #ACCOUNT-RECORD
+
+    * -- Account Identity ----------------------------------------
+    2 #ACCOUNT-NUMBER               (A11)
+      /* FILE 100 AA. Format: BBBBTTTNNNNC (Luhn mod-10 validated).
+      /* B=Branch(4) T=Type(3) N=Sequence(4) C=CheckDigit.
+    2 #CUSTOMER-ID                  (A10)
+      /* FILE 100 AB. Foreign key -> FILE 050 AA (Customer Master).
+    2 #PRODUCT-CODE                 (A6)
+      /* FILE 100 AC. Foreign key -> FILE 110 PA (Product Master).
+    2 #ACCOUNT-TYPE                 (A4)
+      /* FILE 100 AD. CURR=Current SAVG=Savings FIXD=Fixed
+      /*              CALL=Call  FCCY=ForeignCcy ODRFT=Overdraft
+    2 #ACCOUNT-STATUS               (A2)
+      /* FILE 100 AE. AC=Active  DM=Dormant  CL=Closed
+      /*              FR=Frozen  LN=Lien     SZ=Seized
+    2 #DATE-OPENED                  (P8)
+      /* FILE 100 AF. YYYYMMDD packed decimal.
+    2 #DATE-CLOSED                  (P8)
+      /* FILE 100 AG. Zero if account still open.
+    2 #CURRENCY-CODE                (A3)
+      /* FILE 100 AH. ISO 4217 alpha-3.
+
+    * -- Balances (all SIGNED PACKED 13.2) ----------------------
+    2 #CURRENT-BALANCE              (P15)
+      /* FILE 100 AI. Total book balance including uncleared.
+    2 #AVAILABLE-BALANCE            (P15)
+      /* FILE 100 AJ. Current minus lien and uncleared amounts.
+    2 #CLEARED-BALANCE              (P15)
+      /* FILE 100 AK. Cleared funds only — used for cheque limits.
+    2 #UNCLEARED-BALANCE            (P15)
+      /* FILE 100 AL. Cheques deposited not yet cleared.
+    2 #OVERDRAFT-LIMIT              (P15)
+      /* FILE 100 AM. Zero if no OD facility on this account.
+    2 #OVERDRAFT-EXPIRY-DATE        (P8)
+      /* FILE 100 AN. Date OD facility expires. Zero if permanent.
+    2 #LIEN-AMOUNT                  (P15)
+      /* FILE 100 AO. Amount held against legal order or guarantee.
+
+    * -- Accruals -------------------------------------------------
+    2 #ACCRUED-INTEREST-DR          (P15)
+      /* FILE 100 AX. Interest customer owes bank (debit products).
+    2 #ACCRUED-INTEREST-CR          (P15)
+      /* FILE 100 AY. Interest bank owes customer (savings/call).
+    2 #ACCRUED-CHARGES              (P15)
+      /* FILE 100 AZ. Service charges accrued not yet posted.
+    2 #INTEREST-DUE-DATE            (P8)
+      /* FILE 100 BA. Next scheduled interest posting date.
+    2 #CHARGE-DUE-DATE              (P8)
+      /* FILE 100 BB. Next scheduled charge posting date.
+
+    * -- Rate and Product References -----------------------------
+    2 #INTEREST-RATE-CODE           (A6)
+      /* FILE 100 AP. Foreign key -> FILE 115 (Interest Rate Table).
+    2 #CHARGE-SCHEDULE-CODE         (A6)
+      /* FILE 100 AQ. Foreign key -> FILE 120 (Charge Schedule).
+    2 #STATEMENT-CYCLE              (A2)
+      /* FILE 100 AR. MN=Monthly QT=Quarterly HY=HalfYearly AN=Annual
+    2 #STATEMENT-DELIVERY           (A4)
+      /* FILE 100 AS. EPPR=ePaper PAPR=Paper BOTH NONE
+
+    * -- Location and Ownership ----------------------------------
+    2 #BRANCH-CODE                  (A4)
+      /* FILE 100 AT. Foreign key -> FILE 035 (Branch Master).
+    2 #RELATIONSHIP-MGR-ID          (A8)
+      /* FILE 100 AU. RM user ID. Blank if no dedicated RM.
+    2 #LAST-TRANSACTION-DATE        (P8)
+      /* FILE 100 AV. YYYYMMDD of last debit or credit posting.
+    2 #LAST-STATEMENT-DATE          (P8)
+      /* FILE 100 AW. Date of last statement generated.
+    2 #JOINT-ACCOUNT-FLAG           (A1)
+      /* FILE 100 BH. Y=Joint N=Sole.
+    2 #MANDATE-TYPE                 (A4)
+      /* FILE 100 BI. SOLE=Any one EORE=Either/Or BOTH=All required.
+
+    * -- Freeze and Restriction ----------------------------------
+    2 #FREEZE-REASON-CODE           (A4)
+      /* FILE 100 BC. CORT=Court order DETH=Death FRDT=Fraud
+      /*              SANC=Sanction    Blank if not frozen.
+    2 #FREEZE-DATE                  (P8)
+      /* FILE 100 BD. Date account was frozen.
+    2 #FREEZE-AUTHORISER            (A8)
+      /* FILE 100 BE. User ID of officer who authorised freeze.
+
+    * -- Dormancy ------------------------------------------------
+    2 #DORMANCY-DATE                (P8)
+      /* FILE 100 BF. Date account status changed to DM.
+    2 #DORMANCY-REASON              (A4)
+      /* FILE 100 BG. NINX=No inflow  CUST=Customer request.
+
+    * -- Cross-Domain Links --------------------------------------
+    2 #LINKED-LOAN-ACCOUNT          (A12)
+      /* FILE 100 BJ. -> FILE 200 LA. Blank if no loan linkage.
+
+    * -- Compliance Flags ----------------------------------------
+    2 #OFAC-FLAG                    (A1)
+      /* FILE 100 BM. Y/N. Written by FRAUD domain via CBACS006.
+      /* Never written directly by CORE BANKING programs.
+    2 #OFAC-LAST-CHECKED            (P8)
+      /* FILE 100 BN. Date of last OFAC screening.
+    2 #TAX-WITHHOLDING-FLAG         (A1)
+      /* FILE 100 BO. Y=TDS applicable N=Not applicable.
+    2 #TDS-RATE                     (P5)
+      /* FILE 100 BP. TDS percentage as packed (3.2 format).
+
+    * -- Optimistic Lock -----------------------------------------
+    2 #RECORD-VERSION               (P5)
+      /* FILE 100 FF. Incremented on every UPDATE.
+      /* Caller must read then pass back on update calls.
+      /* Mismatch -> response code 1004 (VersionConflict).
+
+    * -- Audit ---------------------------------------------------
+    2 #CREATED-BY-USER-ID           (A8)
+      /* FILE 100 FA.
+    2 #CREATED-TIMESTAMP            (A26)
+      /* FILE 100 FB. ISO 8601: YYYY-MM-DD HH:MM:SS.mmmmmm
+    2 #LAST-UPDATED-BY              (A8)
+      /* FILE 100 FC.
+    2 #LAST-UPDATED-TIMESTAMP       (A26)
+      /* FILE 100 FD.
+    2 #LAST-UPDATED-PROGRAM         (A8)
+      /* FILE 100 FE. Program name that last modified the record.
+
+  * -- Working fields (NOT stored in ADABAS) -------------------
+  1 #ACCOUNT-WORK
+    2 #ACCT-FOUND-FLAG              (A1)
+      /* Y = Record found in FILE 100. N = Not found.
+    2 #ACCT-IS-ACTIVE               (A1)
+      /* Y if #ACCOUNT-STATUS = 'AC'. Derived at read time.
+    2 #ACCT-IS-FROZEN               (A1)
+      /* Y if STATUS is FR, LN, or SZ.
+    2 #ACCT-HAS-OD-FACILITY         (A1)
+      /* Y if #OVERDRAFT-LIMIT > 0.
+    2 #ACCT-DAYS-DORMANT            (P5)
+      /* Derived from #DORMANCY-DATE vs #SYS-BUSINESS-DATE.
+    2 #ACCT-ADABAS-ISN              (P10)
+      /* ADABAS ISN of the account record. Retained for UPDATE.
+
+END-DEFINE

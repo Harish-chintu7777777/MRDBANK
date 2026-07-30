@@ -1,0 +1,196 @@
+* ============================================================
+* NAME     : CBTXP001
+* TYPE     : Program (Online Driver)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBTXP001
+* PURPOSE  : Teller Transaction Entry Online Driver. Entry point
+*            for teller posting deposits, withdrawals, and transfers.
+*            FULL CALL CHAIN (5 levels):
+*              CBTXP001 (L1 — online driver)
+*                -> CBTXVD01 (L2 — validation)
+*                   -> CBACS001 (L3 — account read R mode)
+*                -> CBTXS001 (L2 — posting engine)
+*                   -> CBACS001 (L3 — re-read with HOLD)
+*                   -> CBGLS001 (L3 — GL double entry)
+*                      -> CMUTS007 (L4 — GL audit)
+*                   -> CMUTS007 (L3 — transaction audit)
+*            ET issued by CBTXS001 covering all four ADABAS files.
+* CICS TRANSACTION: CTXN
+* MAP      : CBTXM001 (transaction entry map)
+* CALLED BY: ETP online terminal (CICS transaction CTXN)
+* DEPENDS  : GDA CMDAG001, LDA CBTXL001
+*            CBTXVD01 (validate), CBTXS001 (post)
+* CHANGED  : 1994-02-10  Initial creation
+*            2008-07-22  Added balance-after display (post incident)
+*            2019-03-01  Added OD override PF key (PF9)
+* ============================================================
+DEFINE DATA
+  GLOBAL USING CMDAG001
+  LOCAL  USING CBTXL001
+  LOCAL
+    /* Screen input fields */
+    1 #SCR-ACCOUNT-NUMBER   (A11)
+    1 #SCR-TXN-TYPE-CODE    (A4)
+    1 #SCR-DR-CR            (A1)
+    1 #SCR-AMOUNT           (N15.2)
+    1 #SCR-CURRENCY         (A3)
+    1 #SCR-VALUE-DATE       (A8)   /* YYYYMMDD as alphanumeric on screen
+    1 #SCR-NARRATIVE-1      (A40)
+    1 #SCR-NARRATIVE-2      (A40)
+    1 #SCR-REFERENCE        (A20)
+    1 #SCR-CHANNEL          (A4)
+    1 #SCR-AUTHORISER-ID    (A8)
+    1 #SCR-GL-DR-ACCOUNT    (A12)
+    1 #SCR-GL-CR-ACCOUNT    (A12)
+    1 #SCR-OVERRIDE-LIMIT   (A1)
+    /* Screen output / display */
+    1 #SCR-MESSAGE          (A80)
+    1 #SCR-ACCT-STATUS      (A2)
+    1 #SCR-AVAIL-BAL        (N15.2)
+    1 #SCR-CURR-BAL         (N15.2)
+    1 #SCR-TXN-ID           (A20)
+    1 #SCR-BAL-AFTER        (N15.2)
+    /* Validation subprogram returns */
+    1 #VD-RESP-CODE         (N4)
+    1 #VD-RESP-TEXT         (A80)
+    1 #VD-ACCT-STATUS       (A2)
+    1 #VD-AVAIL-BAL         (P15)
+    1 #VD-CURR-BAL          (P15)
+    1 #VD-OD-LIMIT          (P15)
+    1 #VD-CCY               (A3)
+    1 #VD-RECORD-VERSION    (P5)
+    /* Posting subprogram PDA */
+    1 #TXN-PDA PARAMETER USING CBTXA001
+    /* Working */
+    1 #VALUE-DATE-PACKED    (P8)
+    1 #AMOUNT-PACKED        (P15)
+END-DEFINE
+
+* ── EOD Guard ───────────────────────────────────────────────
+IF #SYS-EOD-FLAG = 'Y'
+  MOVE 'SYSTEM EOD IN PROGRESS - TELLER TRANSACTIONS SUSPENDED'
+       TO #SCR-MESSAGE
+  INPUT USING MAP 'CBACM002'
+  STOP
+END-IF
+
+* ── Default screen values ────────────────────────────────────
+MOVE #SYS-BUSINESS-DATE    TO #SCR-VALUE-DATE  /* Default today
+MOVE 'TELL'                TO #SCR-CHANNEL
+MOVE #SYS-USER-ID          TO #SCR-ACCOUNT-NUMBER  /* Clear for real entry
+MOVE 'N'                   TO #SCR-OVERRIDE-LIMIT
+
+REPEAT
+
+  INPUT USING MAP 'CBTXM001'   /* Teller enters transaction
+
+  IF *PF-KEY = 'PF3' OR *PF-KEY = 'PF15'
+    ESCAPE BOTTOM
+  END-IF
+
+  /* PF9 = OD override (authorised tellers only) */
+  IF *PF-KEY = 'PF9'
+    MOVE 'Y' TO #SCR-OVERRIDE-LIMIT
+    MOVE 'OD OVERRIDE ACTIVE - ENTER AUTHORISER ID' TO #SCR-MESSAGE
+    REINPUT #SCR-MESSAGE MARK *#SCR-AUTHORISER-ID
+  END-IF
+
+  MOVE ' ' TO #SCR-MESSAGE
+
+  * ── Basic screen edits ──────────────────────────────────
+  IF #SCR-ACCOUNT-NUMBER = ' '
+    REINPUT 'ACCOUNT NUMBER IS REQUIRED' MARK *#SCR-ACCOUNT-NUMBER
+  END-IF
+  IF #SCR-AMOUNT <= 0
+    REINPUT 'AMOUNT MUST BE GREATER THAN ZERO' MARK *#SCR-AMOUNT
+  END-IF
+  IF #SCR-OVERRIDE-LIMIT = 'Y' AND #SCR-AUTHORISER-ID = ' '
+    REINPUT 'AUTHORISER ID REQUIRED FOR OD OVERRIDE' MARK *#SCR-AUTHORISER-ID
+  END-IF
+
+  /* Convert screen amount to packed */
+  MOVE #SCR-AMOUNT        TO #AMOUNT-PACKED
+  MOVE #SCR-VALUE-DATE    TO #VALUE-DATE-PACKED
+
+  * ── Step 1: Validate transaction ──────────────────────────
+  * CALL CHAIN: CBTXP001(L1) -> CBTXVD01(L2) -> CBACS001(L3)
+  CALLNAT 'CBTXVD01'
+    #SCR-ACCOUNT-NUMBER
+    #SCR-DR-CR
+    #AMOUNT-PACKED
+    #SCR-CURRENCY
+    #VALUE-DATE-PACKED
+    #SCR-TXN-TYPE-CODE
+    #SCR-OVERRIDE-LIMIT
+    #VD-RESP-CODE
+    #VD-RESP-TEXT
+    #VD-ACCT-STATUS
+    #VD-AVAIL-BAL
+    #VD-CURR-BAL
+    #VD-OD-LIMIT
+    #VD-CCY
+    #VD-RECORD-VERSION
+
+  IF #VD-RESP-CODE NE 0
+    MOVE #VD-RESP-TEXT TO #SCR-MESSAGE
+    REINPUT 'VALIDATION FAILED' MARK *#SCR-ACCOUNT-NUMBER
+  END-IF
+
+  /* Display current balance for teller confirmation */
+  MOVE #VD-AVAIL-BAL  TO #SCR-AVAIL-BAL
+  MOVE #VD-CURR-BAL   TO #SCR-CURR-BAL
+  MOVE #VD-ACCT-STATUS TO #SCR-ACCT-STATUS
+
+  /* PF5 = Post transaction */
+  IF *PF-KEY NE 'PF5'
+    MOVE 'BALANCE DISPLAYED - PRESS PF5 TO CONFIRM POST, PF3 TO EXIT'
+         TO #SCR-MESSAGE
+    REINPUT #SCR-MESSAGE
+  END-IF
+
+  * ── Step 2: Post transaction via CBTXS001 ─────────────────
+  * CALL CHAIN: CBTXP001(L1) -> CBTXS001(L2) -> CBACS001,CBGLS001(L3)
+  *                                              -> CMUTS007(L4)
+  MOVE #SCR-ACCOUNT-NUMBER  TO #TXN-PDA.#P-TXN-INPUT.#P-ACCOUNT-NUMBER
+  MOVE #SCR-TXN-TYPE-CODE   TO #TXN-PDA.#P-TXN-INPUT.#P-TRANSACTION-TYPE-CODE
+  MOVE #SCR-DR-CR           TO #TXN-PDA.#P-TXN-INPUT.#P-DR-CR-INDICATOR
+  MOVE #AMOUNT-PACKED       TO #TXN-PDA.#P-TXN-INPUT.#P-AMOUNT
+  MOVE #SCR-CURRENCY        TO #TXN-PDA.#P-TXN-INPUT.#P-CURRENCY-CODE
+  MOVE #VALUE-DATE-PACKED   TO #TXN-PDA.#P-TXN-INPUT.#P-VALUE-DATE
+  MOVE #SCR-NARRATIVE-1     TO #TXN-PDA.#P-TXN-INPUT.#P-NARRATIVE-LINE-1
+  MOVE #SCR-NARRATIVE-2     TO #TXN-PDA.#P-TXN-INPUT.#P-NARRATIVE-LINE-2
+  MOVE #SCR-REFERENCE       TO #TXN-PDA.#P-TXN-INPUT.#P-REFERENCE-NUMBER
+  MOVE 'TELL'               TO #TXN-PDA.#P-TXN-INPUT.#P-CHANNEL-CODE
+  MOVE #SYS-USER-ID         TO #TXN-PDA.#P-TXN-INPUT.#P-TELLER-ID
+  MOVE #SCR-AUTHORISER-ID   TO #TXN-PDA.#P-TXN-INPUT.#P-AUTHORISER-ID
+  MOVE #SCR-GL-DR-ACCOUNT   TO #TXN-PDA.#P-TXN-INPUT.#P-GL-ACCOUNT-DR
+  MOVE #SCR-GL-CR-ACCOUNT   TO #TXN-PDA.#P-TXN-INPUT.#P-GL-ACCOUNT-CR
+  MOVE #SCR-OVERRIDE-LIMIT  TO #TXN-PDA.#P-TXN-INPUT.#P-OVERRIDE-LIMIT
+  MOVE #VD-RECORD-VERSION   TO #TXN-PDA.#P-TXN-INPUT.#P-RECORD-VERSION
+
+  CALLNAT 'CBTXS001'
+    #TXN-PDA.#P-TXN-INPUT
+    #TXN-PDA.#P-TXN-OUTPUT
+    #TXN-PDA.#P-RESPONSE-CODE
+    #TXN-PDA.#P-RESPONSE-TEXT
+    #TXN-PDA.#P-ADABAS-RESPONSE
+
+  IF #TXN-PDA.#P-RESPONSE-CODE NE 0
+    MOVE #TXN-PDA.#P-RESPONSE-TEXT TO #SCR-MESSAGE
+    REINPUT 'TRANSACTION POST FAILED - SEE MESSAGE'
+  END-IF
+
+  /* Display posted transaction details */
+  MOVE #TXN-PDA.#P-TXN-OUTPUT.#P-TRANSACTION-ID TO #SCR-TXN-ID
+  MOVE #TXN-PDA.#P-TXN-OUTPUT.#P-BALANCE-AFTER  TO #SCR-BAL-AFTER
+  MOVE 'TRANSACTION POSTED. REF: '              TO #SCR-MESSAGE
+  MOVE #SCR-TXN-ID TO #SCR-MESSAGE(27:20)
+
+  /* Reset for next transaction */
+  MOVE 'N' TO #SCR-OVERRIDE-LIMIT
+  MOVE ' ' TO #SCR-AUTHORISER-ID
+  MOVE ' ' TO #SCR-ACCOUNT-NUMBER
+
+END-REPEAT
+
+END

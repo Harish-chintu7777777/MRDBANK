@@ -1,0 +1,161 @@
+* ============================================================
+* NAME     : CBGLP001
+* TYPE     : Program (Batch — NATBAT execution)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBGLP001
+* JCL JOB  : MRDCE008 (EOD — GL Batch Summarisation)
+*             Predecessor: MRDCE007 (direct debit) must complete.
+*             Successor:   MRDCE009 (suspense reconciliation).
+* PURPOSE  : GL Batch Summariser. EOD program that reads all
+*            transactions from FILE 150 for today's business date,
+*            verifies GL posting status (PS), and produces the
+*            daily GL summary report. Also detects and reports
+*            any transactions with GL-POSTING-STATUS = PE (pending)
+*            or ER (error) which require manual intervention.
+*            LEGACY NOTE: This program reads FILE 150 via its own
+*            DDM rather than calling CBTXDB02. This was written in
+*            1994 before the CALLNAT convention was established.
+*            Approved exception: CAB/2019/0441. Do not replicate.
+* CALL CHAIN:
+*   CBGLP001 (L1 — batch driver)
+*     -> CMUTS007 (L2 — audit for GL summary run)
+*     [No further CALLNAT chain — FILE 150 read direct per exception]
+* INPUT    : FILE 150 (read by SU-ACCT-DATE superdescriptor range)
+*            FILE 105 (read for GL account descriptions)
+*            FILE 015 (system parameters — business date)
+* OUTPUT   : CMPRINT — GL daily summary report
+*            CMWKF01 — GL pending/error exception file
+*            FILE 010 — audit trail (via CMUTS007)
+* ET FREQ  : No ADABAS writes. Read-only. CMUTS007 may issue STORE.
+* CHANGED  : 1994-04-01  Initial creation
+*            2001-08-15  Added pending/error exception detection
+*            2019-06-11  CAB/2019/0441 — legacy exception approved
+* ============================================================
+DEFINE DATA
+  GLOBAL USING CMDAG001
+  LOCAL
+    1 TXN-VIEW VIEW OF MRD-COREBKG-TXNHIST
+      2 AA    /* TRANSACTION-ID
+      2 AB    /* ACCOUNT-NUMBER
+      2 AG    /* TRANSACTION-TYPE-CODE
+      2 AI    /* DR-CR-INDICATOR
+      2 AJ    /* AMOUNT
+      2 AK    /* CURRENCY-CODE
+      2 AE    /* POSTING-DATE
+      2 BA    /* GL-ENTRY-REFERENCE
+      2 BB    /* GL-POSTING-STATUS
+    1 GL-VIEW VIEW OF MRD-COREBKG-GLMASTER
+      2 GA    /* GL-ACCOUNT-CODE
+      2 GD    /* DEBIT-BALANCE
+      2 GE    /* CREDIT-BALANCE
+      2 GF    /* PERIOD-CODE
+    /* Summary accumulators */
+    1 #TOTAL-DEBITS          (P15)
+    1 #TOTAL-CREDITS         (P15)
+    1 #TXN-COUNT             (N9)
+    1 #PENDING-COUNT         (N5)
+    1 #ERROR-COUNT           (N5)
+    /* Control */
+    1 #PERIOD-CODE           (A6)
+    1 #DATE-FROM             (P8)
+    1 #DATE-TO               (P8)
+    1 #AUD-RESP              (N4)
+    1 #AUD-TEXT              (A80)
+END-DEFINE
+
+MOVE #SYS-BUSINESS-DATE TO #DATE-FROM
+MOVE #SYS-BUSINESS-DATE TO #DATE-TO
+MOVE #SYS-BUSINESS-DATE(1:6) TO #PERIOD-CODE
+
+WRITE TITLE 'MERIDIAN BANK - GL DAILY SUMMARY - CBGLP001'
+WRITE '  BUSINESS DATE : ' #SYS-BUSINESS-DATE
+WRITE '  PERIOD CODE   : ' #PERIOD-CODE
+WRITE '  JOB NAME      : ' #SYS-TERMINAL-ID
+WRITE ' '
+
+* ══════════════════════════════════════════════════════════
+* Read FILE 150 by SU-ACCT-DATE superdescriptor
+* LEGACY: Direct FILE 150 read (CAB/2019/0441 exception)
+* ══════════════════════════════════════════════════════════
+FIND TXN-VIEW WITH AE = #DATE-FROM AND AE <= #DATE-TO
+  SORT BY AE AG AB
+
+  COMPUTE #TXN-COUNT = #TXN-COUNT + 1
+
+  IF TXN-VIEW.AI = 'D'
+    COMPUTE #TOTAL-DEBITS = #TOTAL-DEBITS + TXN-VIEW.AJ
+  ELSE
+    COMPUTE #TOTAL-CREDITS = #TOTAL-CREDITS + TXN-VIEW.AJ
+  END-IF
+
+  /* Detect GL posting anomalies */
+  IF TXN-VIEW.BB = 'PE'
+    COMPUTE #PENDING-COUNT = #PENDING-COUNT + 1
+    WRITE '  ** PENDING GL: TXN=' TXN-VIEW.AA
+          ' ACCT=' TXN-VIEW.AB
+          ' AMT=' TXN-VIEW.AJ
+          ' TYPE=' TXN-VIEW.AG
+    /* Write to exception file for manual review */
+    WRITE WORK FILE 1 TXN-VIEW.AA TXN-VIEW.AB TXN-VIEW.AJ TXN-VIEW.BB
+  END-IF
+
+  IF TXN-VIEW.BB = 'ER'
+    COMPUTE #ERROR-COUNT = #ERROR-COUNT + 1
+    WRITE '  ** ERROR GL  : TXN=' TXN-VIEW.AA
+          ' ACCT=' TXN-VIEW.AB
+          ' AMT=' TXN-VIEW.AJ
+          ' GL-REF=' TXN-VIEW.BA
+    WRITE WORK FILE 1 TXN-VIEW.AA TXN-VIEW.AB TXN-VIEW.AJ TXN-VIEW.BB
+
+  END-IF
+
+END-FIND
+
+* ── GL Balance Report from FILE 105 ─────────────────────────
+WRITE ' '
+WRITE '─────────────────────────────────────────────────────'
+WRITE '  GL ACCOUNT BALANCES FOR PERIOD: ' #PERIOD-CODE
+WRITE '─────────────────────────────────────────────────────'
+
+FIND GL-VIEW WITH GF = #PERIOD-CODE
+  WRITE '  GL-ACCT: ' GL-VIEW.GA
+        '  DR-BAL: ' GL-VIEW.GD
+        '  CR-BAL: ' GL-VIEW.GE
+END-FIND
+
+* ── Final summary ───────────────────────────────────────────
+WRITE ' '
+WRITE '══════════════════════════════════════════════════════'
+WRITE '  CBGLP001 GL DAILY SUMMARY - TOTALS'
+WRITE '══════════════════════════════════════════════════════'
+WRITE '  TOTAL TRANSACTIONS : ' #TXN-COUNT
+WRITE '  TOTAL DEBITS       : ' #TOTAL-DEBITS
+WRITE '  TOTAL CREDITS      : ' #TOTAL-CREDITS
+WRITE '  PENDING GL ENTRIES : ' #PENDING-COUNT
+WRITE '  ERROR GL ENTRIES   : ' #ERROR-COUNT
+
+/* Debit/credit parity check */
+IF #TOTAL-DEBITS NE #TOTAL-CREDITS
+  WRITE '** WARNING: DEBIT/CREDIT IMBALANCE DETECTED **'
+  WRITE '   DIFFERENCE: ' #TOTAL-DEBITS - #TOTAL-CREDITS
+  WRITE '   ESCALATE TO OPERATIONS AND GL TEAM IMMEDIATELY'
+END-IF
+
+IF #PENDING-COUNT > 0 OR #ERROR-COUNT > 0
+  WRITE '** ACTION REQUIRED: GL EXCEPTIONS IN CMWKF01 **'
+END-IF
+
+* ── Audit trail for this GL run ─────────────────────────────
+* CALL DEPTH: CBGLP001(L1) -> CMUTS007(L2)
+CALLNAT 'CMUTS007'
+  'POST'
+  'GL  '
+  #PERIOD-CODE
+  105
+  ' '
+  EDIT(#TXN-COUNT,'ZZZZZZZ99')
+  'CBGLP001'
+  #AUD-RESP
+  #AUD-TEXT
+
+END

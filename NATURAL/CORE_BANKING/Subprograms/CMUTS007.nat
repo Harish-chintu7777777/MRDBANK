@@ -1,0 +1,107 @@
+* ============================================================
+* NAME     : CMUTS007
+* TYPE     : Subprogram (CALLNAT target)
+* LIBRARY  : MRDCMLIB  (Common utilities — steplib for all domains)
+* OBJECT   : CMUTS007
+* PURPOSE  : Audit trail writer. Stores one record to FILE 010
+*            (AUDIT TRAIL) for every significant program action.
+*            Called by EVERY program in EVERY domain that creates,
+*            updates, or deletes master data or posts transactions.
+*            Single point for all audit writes — ensures consistent
+*            format and prevents direct FILE 010 access by callers.
+* PREDICT  : Registered under MRDDDMLIB
+* CALLED BY: CBTXS001 (transaction post)
+*            CBACS002 (account create)
+*            CBACS003 (account update)
+*            CBGLS001 (GL posting)
+*            LNMOP010 (loan master setup)
+*            PYINS001 (payment write)
+*            FDALS001 (fraud alert write)
+*            ... all domain programs (>80 callers)
+* DEPENDS  : GDA CMDAG001 (reads SYS-USER-ID, SYS-BUSINESS-DATE,
+*                          SYS-ENVIRONMENT)
+*            FILE 010 MRD-SHARED-AUDIT (write)
+* ADABAS   : FILE 010 (STORE only — never reads, never updates)
+* ET/BT    : Does NOT issue ET. Caller controls transaction boundary.
+*            If FILE 010 STORE fails, sets response 9010 but does
+*            NOT issue BT — audit failure is logged to CMPRINT
+*            but must not roll back the business transaction.
+* CHANGED  : 1994-02-10  Initial creation
+*            2008-07-22  Added #P-BEFORE-IMAGE and #P-AFTER-IMAGE
+*            2018-09-01  Added #P-FILE-NUMBER for cross-file auditing
+* ============================================================
+DEFINE DATA
+  GLOBAL   USING CMDAG001
+  PARAMETER
+    1 #P-AUDIT-ACTION    (A8)     /* IN: CRTE UPDT DELT POST AUTH LOGN
+    1 #P-AUDIT-ENTITY    (A4)     /* IN: ACCT TXNR LOAN PYMT ALRT CUST GL
+    1 #P-ENTITY-KEY      (A20)    /* IN: Primary key of affected record
+    1 #P-FILE-NUMBER     (N3)     /* IN: ADABAS file number (100,150,200..)
+    1 #P-BEFORE-IMAGE    (A200)   /* IN: Key fields before change. Blank=Insert
+    1 #P-AFTER-IMAGE     (A200)   /* IN: Key fields after change. Blank=Delete
+    1 #P-CALLING-PROGRAM (A8)     /* IN: Name of calling program
+    1 #P-RESPONSE-CODE   (N4)     /* OUT: 0000=OK 9010=AuditStoreFailure
+    1 #P-RESPONSE-TEXT   (A80)    /* OUT: Description
+  LOCAL
+    1 AUDIT-VIEW VIEW OF MRD-SHARED-AUDIT
+      2 AA                        /* AUDIT-ID        (A26)
+      2 AB                        /* ACTION-CODE     (A8)
+      2 AC                        /* ENTITY-TYPE     (A4)
+      2 AD                        /* ENTITY-KEY      (A20)
+      2 AE                        /* FILE-NUMBER     (N3)
+      2 AF                        /* USER-ID         (A8)
+      2 AG                        /* TERMINAL-ID     (A8)
+      2 AH                        /* PROGRAM-NAME    (A8)
+      2 AI                        /* BUSINESS-DATE   (P8)
+      2 AJ                        /* TIMESTAMP       (A26)
+      2 AK                        /* ENVIRONMENT     (A4)
+      2 AL                        /* BEFORE-IMAGE    (A200)
+      2 AM                        /* AFTER-IMAGE     (A200)
+    1 #TIMESTAMP          (A26)
+    1 #AUDIT-ID           (A26)
+END-DEFINE
+
+* ── Build audit record ─────────────────────────────────────
+MOVE *TIMX        TO #TIMESTAMP           /* Natural system timestamp
+MOVE #TIMESTAMP   TO #AUDIT-ID            /* Audit ID = timestamp (unique enough)
+
+MOVE #AUDIT-ID             TO AUDIT-VIEW.AA
+MOVE #P-AUDIT-ACTION       TO AUDIT-VIEW.AB
+MOVE #P-AUDIT-ENTITY       TO AUDIT-VIEW.AC
+MOVE #P-ENTITY-KEY         TO AUDIT-VIEW.AD
+MOVE #P-FILE-NUMBER        TO AUDIT-VIEW.AE
+MOVE #SYS-USER-ID          TO AUDIT-VIEW.AF
+MOVE #SYS-TERMINAL-ID      TO AUDIT-VIEW.AG
+MOVE #P-CALLING-PROGRAM    TO AUDIT-VIEW.AH
+MOVE #SYS-BUSINESS-DATE    TO AUDIT-VIEW.AI
+MOVE #TIMESTAMP            TO AUDIT-VIEW.AJ
+MOVE #SYS-ENVIRONMENT      TO AUDIT-VIEW.AK
+MOVE #P-BEFORE-IMAGE       TO AUDIT-VIEW.AL
+MOVE #P-AFTER-IMAGE        TO AUDIT-VIEW.AM
+
+* ── Store to FILE 010 ──────────────────────────────────────
+STORE AUDIT-VIEW
+IF *ADABAS-RESPONSE NE 0
+  MOVE *ADABAS-RESPONSE        TO #SYS-LAST-ADABAS-RESPONSE
+  MOVE 'CMUTS007'              TO #SYS-LAST-ERROR-PROGRAM
+  MOVE 9010                    TO #P-RESPONSE-CODE
+  MOVE 'AUDIT STORE FAILED - SEE CMPRINT FOR ADABAS CODE'
+                               TO #P-RESPONSE-TEXT
+  /*
+  /* IMPORTANT: Do NOT issue BT here.
+  /* Audit failure must not roll back the business transaction.
+  /* Log to CMPRINT and return non-zero response so caller can log.
+  /*
+  WRITE 'CMUTS007 AUDIT STORE FAILED'
+        ' FILE=010'
+        ' ADABAS-RESP=' *ADABAS-RESPONSE
+        ' ENTITY=' #P-AUDIT-ENTITY
+        ' KEY=' #P-ENTITY-KEY
+        ' PROG=' #P-CALLING-PROGRAM
+  ESCAPE ROUTINE
+END-IF
+
+MOVE 0000 TO #P-RESPONSE-CODE
+MOVE 'AUDIT RECORD STORED SUCCESSFULLY' TO #P-RESPONSE-TEXT
+
+END

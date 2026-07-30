@@ -1,0 +1,64 @@
+* ============================================================
+* NAME     : CMDAG001
+* TYPE     : Global Data Area (GDA)
+* LIBRARY  : MRDCMLIB
+* OBJECT   : CMDAG001
+* PURPOSE  : System-wide session context loaded at logon (online)
+*            or NATBAT initialisation (batch). Read by ALL programs
+*            in ALL libraries. Written only by session init routines
+*            CBEOP005 (batch) and logon map handler (online).
+* PREDICT  : Registered under MRDDDMLIB
+* USED BY  : Every Natural program in MRDBANK system
+* CHANGED  : 1998-04-01  Initial creation
+*            2003-11-14  Added SYS-EOD-FLAG after balance incident
+*            2015-06-20  Added SYS-RATE-TABLE-VERSION
+*            2021-03-08  Added SYS-PRIOR/NEXT-BUSINESS-DATE
+* ============================================================
+DEFINE DATA GLOBAL
+
+  1 #SYS-CONTEXT
+
+    * -- Session Identity ----------------------------------------
+    2 #SYS-USER-ID                  (A8)
+      /* Natural Security logon ID. Batch: job name truncated to 8.
+    2 #SYS-TERMINAL-ID              (A8)
+      /* Physical terminal ID (online) or job name (batch).
+    2 #SYS-LIBRARY                  (A9)
+      /* Currently executing Natural library.
+    2 #SYS-SESSION-TYPE             (A1)
+      /* O=Online  B=Batch. Set at session init, never changed.
+
+    * -- Business Dates ------------------------------------------
+    2 #SYS-BUSINESS-DATE            (P8)
+      /* Bank's current open business date YYYYMMDD.
+      /* Differs from OS date at EOD/SOD boundary window.
+    2 #SYS-SYSTEM-DATE              (P8)
+      /* OS date from Natural *DATX. Use only for timestamps.
+    2 #SYS-BUSINESS-TIME            (A6)
+      /* HHMMSS snapshot taken at session start.
+    2 #SYS-PRIOR-BUSINESS-DATE      (P8)
+      /* Previous banking day. Used by interest accrual programs.
+    2 #SYS-NEXT-BUSINESS-DATE       (P8)
+      /* Next banking day. Used by schedule and due-date programs.
+
+    * -- Environment ---------------------------------------------
+    2 #SYS-ENVIRONMENT              (A4)
+      /* PROD / UAT  / DR   / DEV
+      /* Programs must check this before any irreversible action.
+    2 #SYS-ADABAS-DBID              (N3)
+      /* Active ADABAS database ID. Parameterised per LPAR.
+    2 #SYS-EOD-FLAG                 (A1)
+      /* Y = EOD cycle in progress. Online programs must refuse
+      /* financial writes when this flag is Y. Set by MRDCE001.
+    2 #SYS-RATE-TABLE-VERSION       (A6)
+      /* FX rate table version loaded at SOD from FILE 025.
+
+    * -- Error Handling ------------------------------------------
+    2 #SYS-LAST-ADABAS-RESPONSE     (N3)
+      /* Last ADABAS response code observed anywhere in session.
+    2 #SYS-LAST-ERROR-PROGRAM       (A8)
+      /* Program name that set the last error.
+    2 #SYS-LAST-ERROR-TEXT          (A80)
+      /* Human-readable error description for log/screen.
+
+END-DEFINE

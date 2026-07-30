@@ -1,0 +1,335 @@
+* ============================================================
+* NAME     : CBTXS001
+* TYPE     : Subprogram (CALLNAT target)
+* LIBRARY  : MRDCBLIB
+* OBJECT   : CBTXS001
+* PURPOSE  : Transaction Post Subprogram. The CORE POSTING ENGINE.
+*            Most-called subprogram in the system (~6.8M calls/day).
+*            Performs the complete posting unit in ONE ET boundary:
+*              1. Re-reads FILE 100 with HOLD (via CBACS001)
+*              2. Verifies optimistic lock (RECORD-VERSION)
+*              3. Updates FILE 100 balances (CURRENT, AVAILABLE, LAST-TXN-DATE)
+*              4. Generates TRANSACTION-ID
+*              5. STOREs FILE 150 transaction record
+*              6. Posts GL double-entry (via CBGLS001) -> FILE 105
+*              7. Writes audit trail (via CMUTS007) -> FILE 010
+*              8. Issues ET
+*            On ANY failure: issues BT before returning error.
+*            Partial commits are NOT permitted.
+* PREDICT  : PDA CBTXA001
+* CALLED BY: CBTXP001 (online teller — after CBTXVD01 validates)
+*            CBTXP010 (batch poster — after validation)
+*            CBSOP011 (standing order executor)
+*            CBDDP001 (direct debit processor)
+*            CBICP002 (interest posting)
+*            CBICP004 (charges posting)
+*            LNRPP011 (loan repayment — cross-domain CALLNAT)
+* CALLS    : CBACS001 (re-read account with HOLD — Level 3)
+*            CBGLS001 (GL posting — Level 3, which calls CMUTS007 L4)
+*            CMUTS007 (audit trail for TXN — Level 3)
+* ET/BT    : OWNS the ET boundary. Issues ET on success, BT on error.
+* CALL DEPTH: Level 2 (online: CBTXP001->CBTXS001)
+*                      (batch:  CBTXP010->CBTXS001)
+*             Calls at Level 3: CBACS001, CBGLS001
+*             CBGLS001 calls at Level 4: CMUTS007
+* ============================================================
+DEFINE DATA
+  GLOBAL USING CMDAG001
+  PARAMETER USING CBTXA001
+  LOCAL  USING CBTXL001
+  LOCAL
+    1 ACCT-VIEW VIEW OF MRD-COREBKG-ACCTMSTR
+      2 AA    /* ACCOUNT-NUMBER
+      2 AB    /* CUSTOMER-ID
+      2 AE    /* ACCOUNT-STATUS
+      2 AH    /* CURRENCY-CODE
+      2 AI    /* CURRENT-BALANCE
+      2 AJ    /* AVAILABLE-BALANCE
+      2 AK    /* CLEARED-BALANCE
+      2 AV    /* LAST-TRANSACTION-DATE
+      2 BO    /* TAX-WITHHOLDING-FLAG
+      2 BP    /* TDS-RATE
+      2 FC    /* LAST-UPDATED-BY
+      2 FD    /* LAST-UPDATED-TIMESTAMP
+      2 FE    /* LAST-UPDATED-PROGRAM
+      2 FF    /* RECORD-VERSION
+    1 TXN-VIEW VIEW OF MRD-COREBKG-TXNHIST
+      2 AA    /* TRANSACTION-ID
+      2 AB    /* ACCOUNT-NUMBER
+      2 AC    /* CUSTOMER-ID
+      2 AD    /* VALUE-DATE
+      2 AE    /* POSTING-DATE
+      2 AF    /* BUSINESS-DATE
+      2 AG    /* TRANSACTION-TYPE-CODE
+      2 AI    /* DR-CR-INDICATOR
+      2 AJ    /* AMOUNT
+      2 AK    /* CURRENCY-CODE
+      2 AL    /* ACCOUNT-CURRENCY
+      2 AM    /* EXCHANGE-RATE
+      2 AN    /* AMOUNT-IN-ACCOUNT-CCY
+      2 AO    /* BALANCE-AFTER
+      2 AP    /* NARRATIVE-LINE-1
+      2 AQ    /* NARRATIVE-LINE-2
+      2 AR    /* REFERENCE-NUMBER
+      2 AS    /* PAYMENT-ID
+      2 AT    /* CHANNEL-CODE
+      2 AU    /* TERMINAL-ID
+      2 AV    /* TELLER-ID
+      2 AW    /* AUTHORISER-ID
+      2 AX    /* REVERSAL-FLAG
+      2 AY    /* ORIGINAL-TRANSACTION-ID
+      2 BA    /* GL-ENTRY-REFERENCE
+      2 BB    /* GL-POSTING-STATUS
+      2 BE    /* BATCH-JOB-NAME
+      2 BF    /* BATCH-JOB-DATE
+      2 BI    /* TAX-AMOUNT
+      2 BK    /* CHARGE-AMOUNT
+      2 BM    /* LOAN-ACCOUNT-NUMBER
+      2 BN    /* STANDING-ORDER-REF
+      2 BQ    /* ARCHIVE-FLAG
+      2 BR    /* CREATED-TIMESTAMP
+      2 BU    /* LAST-UPDATED-PROGRAM
+    1 #CBACS001-PDA PARAMETER USING CBACA001
+    1 #TXN-SEQ              (N6)
+    1 #TXN-ID               (A20)
+    1 #SIGNED-AMOUNT        (P15)   /* Positive for credit, negative for debit
+    1 #ACCT-CCY             (A3)
+    1 #EXCH-RATE            (P12)
+    1 #CONV-AMOUNT          (P15)
+    1 #TAX-AMT              (P15)
+    1 #CHRG-AMT             (P15)
+    1 #GL-ENTRY-REF         (A12)
+    1 #GL-RESP              (N4)
+    1 #GL-TEXT              (A80)
+    1 #AUD-RESP             (N4)
+    1 #AUD-TEXT             (A80)
+    1 #BEFORE-BAL           (A20)
+    1 #AFTER-BAL            (A20)
+END-DEFINE
+
+* ══════════════════════════════════════════════════════════
+* STEP 1: Re-read account with HOLD for update
+*         Validate version number (optimistic lock)
+* CALL DEPTH: CBTXS001(L2) -> CBACS001(L3)
+* ══════════════════════════════════════════════════════════
+MOVE #P-TXN-INPUT.#P-ACCOUNT-NUMBER TO #CBACS001-PDA.#P-ACCOUNT-NUMBER
+MOVE 'H'                             TO #CBACS001-PDA.#P-LOCK-MODE
+
+CALLNAT 'CBACS001'
+  #CBACS001-PDA.#P-ACCOUNT-NUMBER
+  #CBACS001-PDA.#P-LOCK-MODE
+  #CBACS001-PDA.#P-ACCOUNT-RECORD
+  #CBACS001-PDA.#P-RESPONSE-CODE
+  #CBACS001-PDA.#P-RESPONSE-TEXT
+  #CBACS001-PDA.#P-ADABAS-RESPONSE
+
+IF #CBACS001-PDA.#P-RESPONSE-CODE NE 0
+  MOVE #CBACS001-PDA.#P-RESPONSE-CODE TO #P-RESPONSE-CODE
+  MOVE #CBACS001-PDA.#P-RESPONSE-TEXT TO #P-RESPONSE-TEXT
+  BT
+  ESCAPE ROUTINE
+END-IF
+
+/* Optimistic lock check */
+IF #CBACS001-PDA.#P-ACCOUNT-RECORD.#P-RECORD-VERSION NE
+   #P-TXN-INPUT.#P-RECORD-VERSION
+  MOVE 1004 TO #P-RESPONSE-CODE
+  MOVE 'VERSION CONFLICT - RETRY TRANSACTION' TO #P-RESPONSE-TEXT
+  BT
+  ESCAPE ROUTINE
+END-IF
+
+/* Capture pre-update balance for audit */
+MOVE EDIT(#CBACS001-PDA.#P-ACCOUNT-RECORD.#P-CURRENT-BALANCE,'ZZZZZZZZZZZZZ.99')
+     TO #BEFORE-BAL
+
+/* ── Save customer ID (needed for FILE 150 denorm) ─────── */
+MOVE #CBACS001-PDA.#P-ACCOUNT-RECORD.#P-CUSTOMER-ID TO #ACCOUNT-RECORD.#CUSTOMER-ID
+MOVE #CBACS001-PDA.#P-ACCOUNT-RECORD.#P-CURRENCY-CODE TO #ACCT-CCY
+
+* ══════════════════════════════════════════════════════════
+* STEP 2: Calculate converted amount and tax
+* ══════════════════════════════════════════════════════════
+/* FX conversion: in production reads from FILE 025 */
+IF #P-TXN-INPUT.#P-CURRENCY-CODE = #ACCT-CCY
+  MOVE 1000000  TO #EXCH-RATE         /* 1.000000 in 6-decimal packed
+  MOVE #P-TXN-INPUT.#P-AMOUNT TO #CONV-AMOUNT
+ELSE
+  /* Production: CALLNAT 'CMUTS010' for rate lookup */
+  MOVE 1000000  TO #EXCH-RATE         /* Placeholder
+  MOVE #P-TXN-INPUT.#P-AMOUNT TO #CONV-AMOUNT
+END-IF
+MOVE #EXCH-RATE TO #P-TXN-OUTPUT.#P-EXCHANGE-RATE-USED
+
+/* TDS calculation for credit interest transactions */
+MOVE 0 TO #TAX-AMT
+IF #P-TXN-INPUT.#P-TRANSACTION-TYPE-CODE = 'CNIN'
+   AND #CBACS001-PDA.#P-ACCOUNT-RECORD.#P-TAX-WITHHOLDING-FLAG = 'Y'
+  COMPUTE #TAX-AMT = #CONV-AMOUNT *
+    #CBACS001-PDA.#P-ACCOUNT-RECORD.#P-TDS-RATE / 100
+END-IF
+MOVE #TAX-AMT TO #P-TXN-OUTPUT.#P-TAX-AMOUNT
+
+/* Charge calculation: in production calls charge schedule engine */
+MOVE 0 TO #CHRG-AMT
+MOVE #CHRG-AMT TO #P-TXN-OUTPUT.#P-CHARGE-AMOUNT
+
+* ══════════════════════════════════════════════════════════
+* STEP 3: Update FILE 100 balance
+* ══════════════════════════════════════════════════════════
+FIND ACCT-VIEW WITH HOLD AA = #P-TXN-INPUT.#P-ACCOUNT-NUMBER
+  IF *ADABAS-RESPONSE NE 0
+    MOVE 9001 TO #P-RESPONSE-CODE
+    MOVE 'FILE 100 FIND-WITH-HOLD FAILED IN CBTXS001' TO #P-RESPONSE-TEXT
+    BT
+    ESCAPE ROUTINE
+  END-IF
+
+  IF #P-TXN-INPUT.#P-DR-CR-INDICATOR = 'C'
+    COMPUTE ACCT-VIEW.AI = ACCT-VIEW.AI + #CONV-AMOUNT - #TAX-AMT
+    COMPUTE ACCT-VIEW.AJ = ACCT-VIEW.AJ + #CONV-AMOUNT - #TAX-AMT
+  ELSE
+    COMPUTE ACCT-VIEW.AI = ACCT-VIEW.AI - #CONV-AMOUNT - #CHRG-AMT
+    COMPUTE ACCT-VIEW.AJ = ACCT-VIEW.AJ - #CONV-AMOUNT - #CHRG-AMT
+  END-IF
+
+  MOVE #SYS-BUSINESS-DATE          TO ACCT-VIEW.AV
+  MOVE #SYS-USER-ID                TO ACCT-VIEW.FC
+  MOVE *TIMX                       TO ACCT-VIEW.FD
+  MOVE 'CBTXS001'                  TO ACCT-VIEW.FE
+  COMPUTE ACCT-VIEW.FF = #P-TXN-INPUT.#P-RECORD-VERSION + 1
+
+  UPDATE
+
+  IF *ADABAS-RESPONSE NE 0
+    MOVE *ADABAS-RESPONSE  TO #SYS-LAST-ADABAS-RESPONSE
+    MOVE 'CBTXS001'        TO #SYS-LAST-ERROR-PROGRAM
+    MOVE 9001              TO #P-RESPONSE-CODE
+    MOVE 'FILE 100 BALANCE UPDATE FAILED' TO #P-RESPONSE-TEXT
+    MOVE *ADABAS-RESPONSE  TO #P-ADABAS-RESPONSE
+    BT
+    ESCAPE ROUTINE
+  END-IF
+
+  MOVE ACCT-VIEW.AI TO #P-TXN-OUTPUT.#P-BALANCE-AFTER
+
+END-FIND
+
+* ══════════════════════════════════════════════════════════
+* STEP 4: Generate TRANSACTION-ID and STORE FILE 150
+* ══════════════════════════════════════════════════════════
+/* Format: YYYYMMDD(8) + HHMMSS(6) + SEQ(6) */
+MOVE #SYS-BUSINESS-DATE TO #TXN-ID(1:8)
+MOVE *TIMX(9:6)         TO #TXN-ID(9:6)
+COMPUTE #TXN-SEQ = *ISN                    /* Unique sequence via ISN
+MOVE EDIT(#TXN-SEQ,'999999') TO #TXN-ID(15:6)
+
+/* Populate FILE 150 view */
+MOVE #TXN-ID                                  TO TXN-VIEW.AA
+MOVE #P-TXN-INPUT.#P-ACCOUNT-NUMBER           TO TXN-VIEW.AB
+MOVE #ACCOUNT-RECORD.#CUSTOMER-ID             TO TXN-VIEW.AC
+MOVE #P-TXN-INPUT.#P-VALUE-DATE               TO TXN-VIEW.AD
+MOVE #SYS-BUSINESS-DATE                       TO TXN-VIEW.AE
+MOVE #SYS-BUSINESS-DATE                       TO TXN-VIEW.AF
+MOVE #P-TXN-INPUT.#P-TRANSACTION-TYPE-CODE    TO TXN-VIEW.AG
+MOVE #P-TXN-INPUT.#P-DR-CR-INDICATOR          TO TXN-VIEW.AI
+MOVE #P-TXN-INPUT.#P-AMOUNT                   TO TXN-VIEW.AJ
+MOVE #P-TXN-INPUT.#P-CURRENCY-CODE            TO TXN-VIEW.AK
+MOVE #ACCT-CCY                                TO TXN-VIEW.AL
+MOVE #EXCH-RATE                               TO TXN-VIEW.AM
+MOVE #CONV-AMOUNT                             TO TXN-VIEW.AN
+MOVE #P-TXN-OUTPUT.#P-BALANCE-AFTER           TO TXN-VIEW.AO
+MOVE #P-TXN-INPUT.#P-NARRATIVE-LINE-1         TO TXN-VIEW.AP
+MOVE #P-TXN-INPUT.#P-NARRATIVE-LINE-2         TO TXN-VIEW.AQ
+MOVE #P-TXN-INPUT.#P-REFERENCE-NUMBER         TO TXN-VIEW.AR
+MOVE #P-TXN-INPUT.#P-PAYMENT-ID               TO TXN-VIEW.AS
+MOVE #P-TXN-INPUT.#P-CHANNEL-CODE             TO TXN-VIEW.AT
+MOVE #P-TXN-INPUT.#P-TELLER-ID                TO TXN-VIEW.AV
+MOVE #P-TXN-INPUT.#P-AUTHORISER-ID            TO TXN-VIEW.AW
+MOVE 'N'                                      TO TXN-VIEW.AX  /* Not reversal
+MOVE 'PE'                                     TO TXN-VIEW.BB  /* GL pending
+MOVE #P-TXN-INPUT.#P-LOAN-ACCOUNT-NUMBER      TO TXN-VIEW.BM
+MOVE #P-TXN-INPUT.#P-STANDING-ORDER-REF       TO TXN-VIEW.BN
+MOVE #TAX-AMT                                 TO TXN-VIEW.BI
+MOVE #CHRG-AMT                                TO TXN-VIEW.BK
+MOVE 'N'                                      TO TXN-VIEW.BQ  /* Not archived
+MOVE *TIMX                                    TO TXN-VIEW.BR
+MOVE 'CBTXS001'                               TO TXN-VIEW.BU
+
+/* Batch job tracking */
+IF #SYS-SESSION-TYPE = 'B'
+  MOVE #SYS-TERMINAL-ID TO TXN-VIEW.BE      /* Job name in terminal ID
+  MOVE #SYS-BUSINESS-DATE TO TXN-VIEW.BF
+END-IF
+
+STORE TXN-VIEW
+
+IF *ADABAS-RESPONSE NE 0
+  MOVE *ADABAS-RESPONSE  TO #SYS-LAST-ADABAS-RESPONSE
+  MOVE 'CBTXS001'        TO #SYS-LAST-ERROR-PROGRAM
+  MOVE 9002              TO #P-RESPONSE-CODE
+  MOVE 'FILE 150 TRANSACTION STORE FAILED' TO #P-RESPONSE-TEXT
+  MOVE *ADABAS-RESPONSE  TO #P-ADABAS-RESPONSE
+  BT
+  ESCAPE ROUTINE
+END-IF
+
+* ══════════════════════════════════════════════════════════
+* STEP 5: Post GL double-entry via CBGLS001
+* CALL DEPTH: CBTXS001(L2) -> CBGLS001(L3) -> CMUTS007(L4)
+* ══════════════════════════════════════════════════════════
+CALLNAT 'CBGLS001'
+  #P-TXN-INPUT.#P-ACCOUNT-NUMBER
+  'ACCT'
+  #P-TXN-INPUT.#P-GL-ACCOUNT-DR
+  #P-TXN-INPUT.#P-GL-ACCOUNT-CR
+  #CONV-AMOUNT
+  #ACCT-CCY
+  'TXNP'
+  #P-TXN-INPUT.#P-VALUE-DATE
+  #GL-RESP
+  #GL-TEXT
+  #GL-ENTRY-REF
+
+IF #GL-RESP NE 0
+  MOVE #GL-RESP TO #P-RESPONSE-CODE
+  MOVE #GL-TEXT TO #P-RESPONSE-TEXT
+  BT                                    /* Roll back FILE 100 + FILE 150
+  ESCAPE ROUTINE
+END-IF
+
+/* Update GL reference back onto the transaction record */
+MOVE #GL-ENTRY-REF TO #P-TXN-OUTPUT.#P-GL-ENTRY-REFERENCE
+FIND TXN-VIEW WITH HOLD AA = #TXN-ID
+  MOVE #GL-ENTRY-REF TO TXN-VIEW.BA
+  MOVE 'PS'          TO TXN-VIEW.BB    /* GL now posted
+  UPDATE
+END-FIND
+
+* ══════════════════════════════════════════════════════════
+* STEP 6: Audit trail for transaction
+* CALL DEPTH: CBTXS001(L2) -> CMUTS007(L3)
+* ══════════════════════════════════════════════════════════
+MOVE EDIT(#P-TXN-INPUT.#P-AMOUNT,'ZZZZZZZZZZZZZ.99') TO #AFTER-BAL
+
+CALLNAT 'CMUTS007'
+  'POST'
+  'TXNR'
+  #TXN-ID
+  150
+  #BEFORE-BAL
+  #AFTER-BAL
+  'CBTXS001'
+  #AUD-RESP
+  #AUD-TEXT
+
+* ══════════════════════════════════════════════════════════
+* STEP 7: Commit — ET covers FILE 100 + FILE 150 + FILE 105 + FILE 010
+* ══════════════════════════════════════════════════════════
+ET
+
+MOVE #TXN-ID  TO #P-TXN-OUTPUT.#P-TRANSACTION-ID
+MOVE 0000     TO #P-RESPONSE-CODE
+MOVE 'TRANSACTION POSTED SUCCESSFULLY' TO #P-RESPONSE-TEXT
+
+END
