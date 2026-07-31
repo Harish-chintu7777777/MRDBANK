@@ -26,7 +26,7 @@
 
 DB=100
 
-FIELD=AA, 11, A, DE         /* ACCOUNT-NUMBER
+FIELD=AA, 7, A, DE         /* ACCOUNT-NUMBER
                               /* Unique descriptor. Format BBBBTTTNNNNC.
                               /* B=Branch(4) T=Type(3) N=Seq(4) C=Check.
                               /* Luhn mod-10 validated by CBACVD01.
