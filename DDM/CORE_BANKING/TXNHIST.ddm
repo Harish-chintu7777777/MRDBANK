@@ -28,7 +28,7 @@ FIELD=AC, 10, A, DE         /* CUSTOMER-ID
                               /* Denormalised from FILE 100 at post time.
                               /* Avoids FILE 100 join in fraud cross-acct reads.
 
-FIELD=AD,  11, P, DE         /* VALUE-DATE
+FIELD=AD,  8, P, DE         /* VALUE-DATE
                               /* YYYYMMDD. Used for interest calc ranges.
 
 FIELD=AE,  8, P, DE         /* POSTING-DATE
