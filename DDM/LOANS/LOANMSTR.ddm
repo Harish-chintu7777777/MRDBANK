@@ -38,7 +38,7 @@ FIELD=LA, 12, A, DE,U       /* LOAN-ACCOUNT-NUMBER
                               /* B=Branch(4) T=Type(3) L=Seq(5) C=CheckDigit.
                               /* Luhn mod-10 validated by LNMOVD01.
 
-FIELD=LB, 10, A, DE         /* CUSTOMER-ID
+FIELD=LB, 7, A, DE         /* CUSTOMER-ID
                               /* Descriptor. -> FILE 050 AA.
                               /* One customer may have multiple loans.
 
