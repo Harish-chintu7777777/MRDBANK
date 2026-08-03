@@ -34,7 +34,7 @@ DEFINE DATA
     /* Screen input fields (map CBACM001) */
     1 #SCR-CUSTOMER-ID      (A10)
     1 #SCR-PRODUCT-CODE     (A6)
-    1 #SCR-ACCOUNT-TYPE     (A4)
+    1 #SCR-ACCOUNT-TYPE     (A10)
     1 #SCR-CURRENCY         (A3)
     1 #SCR-BRANCH-CODE      (A4)
     1 #SCR-RM-ID            (A8)
