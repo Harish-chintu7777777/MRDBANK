@@ -1,0 +1,146 @@
+# Impact Analysis — enterprise PR-approval gate.
+#
+# Fires ONLY after a qa -> prod promotion PR has received ALL required approvals
+# (GitHub reviewDecision == APPROVED), then runs the pipeline (prod vs qa) and
+# comments the result back on the PR so reviewers see the impact BEFORE merging.
+#
+# It does NOT fire on: push to qa, PR creation, or a partial approval.
+#
+# PLACEMENT: commit this to the **prod** branch (the PR base). For
+# pull_request_review events GitHub reads the workflow file from the base branch.
+# Also DELETE the old push-triggered workflow from the qa branch.
+#
+# Requires (repo Settings -> Secrets/Variables -> Actions):
+#   secret  IMPACT_API_TOKEN = backend TRIGGER_API_TOKEN
+#   var     IMPACT_API_URL   = backend base URL (default http://localhost:8000)
+# And branch protection on prod: require PR + N approvals + block direct pushes
+# (that is what makes reviewDecision == APPROVED mean "all required approvals in").
+
+name: Impact Analysis (on PR approval)
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  pull-requests: write        # read reviewDecision + post the result comment
+
+jobs:
+  impact-analysis:
+    # Only an APPROVAL on the qa -> prod promotion PR.
+    if: >
+      github.event.review.state == 'approved' &&
+      github.event.pull_request.base.ref == 'prod' &&
+      github.event.pull_request.head.ref == 'qa'
+    runs-on: [self-hosted]
+    steps:
+      # 1) Gate: proceed only when EVERY required approval is in.
+      - name: Verify all required approvals (reviewDecision == APPROVED)
+        id: gate
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.event.repository.owner.login }}
+          NAME:  ${{ github.event.repository.name }}
+          PR:    ${{ github.event.pull_request.number }}
+        run: |
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "impact-analysis-gate" }
+          $query = 'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision}}}'
+          $payload = @{ query = $query; variables = @{ owner=$env:OWNER; name=$env:NAME; number=[int]$env:PR } } | ConvertTo-Json -Depth 5 -Compress
+          $resp = Invoke-RestMethod -Uri 'https://api.github.com/graphql' -Method POST -Headers $headers -Body $payload -ContentType 'application/json'
+          $decision = $resp.data.repository.pullRequest.reviewDecision
+          Write-Host "reviewDecision = $decision"
+          if ($decision -ne 'APPROVED') {
+            Write-Host "Not all required approvals are in yet - skipping."
+            "approved=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } else {
+            "approved=true"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
+      # 2) Trigger the pipeline (prod vs the qa tip being promoted).
+      - name: Trigger Impact Analysis
+        id: trigger
+        if: steps.gate.outputs.approved == 'true'
+        shell: powershell
+        env:
+          IMPACT_API_URL:   ${{ vars.IMPACT_API_URL || 'http://localhost:8000' }}
+          IMPACT_API_TOKEN: ${{ secrets.IMPACT_API_TOKEN }}
+          REPO_URL: ${{ github.event.repository.clone_url }}
+          BASE: ${{ github.event.pull_request.base.ref }}   # prod
+          HEAD: ${{ github.event.pull_request.head.ref }}   # qa
+          SHA:  ${{ github.event.pull_request.head.sha }}   # qa tip under review
+          MSG:  ${{ github.event.pull_request.title }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          PRNUM: ${{ github.event.pull_request.number }}
+        run: |
+          $body = @{
+            repo_url        = $env:REPO_URL
+            baseline_branch = $env:BASE
+            target_branch   = $env:HEAD
+            commit_sha      = $env:SHA
+            commit_message  = "PR #$($env:PRNUM): $($env:MSG)"
+            author          = $env:AUTHOR
+          } | ConvertTo-Json
+          Write-Host "PR #$($env:PRNUM) approved -> Impact Analysis: $($env:HEAD) -> $($env:BASE)"
+          $resp = Invoke-RestMethod -Uri "$($env:IMPACT_API_URL)/api/v1/pipeline/trigger" `
+            -Method POST -ContentType "application/json" `
+            -Headers @{ Authorization = "Bearer $($env:IMPACT_API_TOKEN)" } -Body $body
+          if (-not $resp.comparison_id) { throw "Trigger did not return a comparison_id" }
+          Write-Host "comparison_id = $($resp.comparison_id)"
+          "cid=$($resp.comparison_id)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # 3) Wait for the async run to finish (poll the runs list for this id).
+      - name: Wait for result
+        id: result
+        if: steps.gate.outputs.approved == 'true'
+        shell: powershell
+        env:
+          IMPACT_API_URL: ${{ vars.IMPACT_API_URL || 'http://localhost:8000' }}
+          CID: ${{ steps.trigger.outputs.cid }}
+        run: |
+          $deadline = (Get-Date).AddMinutes(20)
+          $status = "running"; $risk = ""
+          do {
+            Start-Sleep -Seconds 15
+            try {
+              $runs = Invoke-RestMethod -Uri "$($env:IMPACT_API_URL)/api/v1/compare/runs" -Method GET
+              $run = $runs | Where-Object { $_.id -eq $env:CID } | Select-Object -First 1
+              if ($run) { $status = "$($run.status)"; $risk = "$($run.risk_band)" }
+              Write-Host "status=$status risk=$risk"
+            } catch { Write-Host "poll error: $_" }
+          } while ($status -eq "running" -and (Get-Date) -lt $deadline)
+          "status=$status" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "risk=$risk"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # 4) Comment the outcome on the PR so reviewers see it before merging.
+      - name: Comment result on PR
+        if: steps.gate.outputs.approved == 'true'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.event.repository.owner.login }}
+          NAME:  ${{ github.event.repository.name }}
+          PRNUM: ${{ github.event.pull_request.number }}
+          STATUS: ${{ steps.result.outputs.status }}
+          RISK:   ${{ steps.result.outputs.risk }}
+          CID:    ${{ steps.trigger.outputs.cid }}
+          IMPACT_API_URL: ${{ vars.IMPACT_API_URL || 'http://localhost:8000' }}
+        run: |
+          $emoji = switch ("$env:RISK") { "CRITICAL" {"🔴"} "HIGH" {"🟠"} "MEDIUM" {"🟡"} "LOW" {"🟢"} default {"⚪"} }
+          $lines = @(
+            "## 🧭 Impact Analysis — promotion of ``qa`` → ``prod``",
+            "",
+            "| | |",
+            "|---|---|",
+            "| **Status** | ``$env:STATUS`` |",
+            "| **Risk** | $emoji **$env:RISK** |",
+            "| **Report** | ``$env:CID`` (open in the Impact Analysis app) |",
+            "",
+            "_Review the full blast radius, compatibility findings, and downstream impact before merging._"
+          )
+          $bodyText = $lines -join "`n"
+          $payload = @{ body = $bodyText } | ConvertTo-Json
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "impact-analysis"; Accept = "application/vnd.github+json" }
+          Invoke-RestMethod -Uri "https://api.github.com/repos/$($env:OWNER)/$($env:NAME)/issues/$($env:PRNUM)/comments" `
+            -Method POST -Headers $headers -Body $payload -ContentType "application/json" | Out-Null
+          Write-Host "Posted Impact Analysis result to PR #$env:PRNUM"
