@@ -42,7 +42,7 @@ FIELD=GI,  10, P, NV         /* LAST-UPDATED-DATE
 
 FIELD=GJ,  6, P, NV         /* LAST-UPDATED-TIME  HHMMSS
 
-FIELD=GK,  8, A, NV         /* POSTING-USER-ID
+FIELD=GK,  18, A, NV         /* POSTING-USER-ID
                               /* SOX: must be populated on all entries.
 
 * -- SUPERDESCRIPTORS -------------------------------------------
