@@ -71,7 +71,7 @@ FIELD=AM, 15, P, NV         /* OVERDRAFT-LIMIT
 
 FIELD=AN,  8, P, NV         /* OVERDRAFT-EXPIRY-DATE
 
-FIELD=AO, 15, P, NV         /* LIEN-AMOUNT
+FIELD=AO, 7, P, NV         /* LIEN-AMOUNT
 
 FIELD=AP,  6, A, DE,NV      /* INTEREST-RATE-CODE
                               /* -> FILE 115.
