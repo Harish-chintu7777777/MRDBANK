@@ -32,7 +32,7 @@ jobs:
       github.event.review.state == 'approved' &&
       github.event.pull_request.base.ref == 'prod' &&
       github.event.pull_request.head.ref == 'qa'
-    runs-on: [self-hosted]
+    runs-on: ubuntu-latest
     steps:
       # 1) Gate: proceed only when EVERY required approval is in.
       - name: Verify all required approvals (reviewDecision == APPROVED)
