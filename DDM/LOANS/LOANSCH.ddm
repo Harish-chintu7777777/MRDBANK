@@ -25,7 +25,7 @@
 
 DB=205
 
-FIELD=SA, 15, A, DE,U       /* SCHEDULE-KEY
+FIELD=SA, 5, A, DE,U       /* SCHEDULE-KEY
                               /* Unique descriptor = LA(12) + SC(3 zero-padded).
                               /* Constructed by LNMOS002 at loan creation.
                               /* Guarantees uniqueness and physical proximity.
