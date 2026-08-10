@@ -27,7 +27,7 @@ FIELD=GB, 40, A, NV         /* GL-DESCRIPTION
 
 FIELD=GC,  3, A             /* CURRENCY
 
-FIELD=GD, 18, P, NV         /* DEBIT-BALANCE   (signed packed 16.2)
+FIELD=GD, 10, P, NV         /* DEBIT-BALANCE   (signed packed 16.2)
 
 FIELD=GE, 18, P, NV         /* CREDIT-BALANCE  (signed packed 16.2)
 
