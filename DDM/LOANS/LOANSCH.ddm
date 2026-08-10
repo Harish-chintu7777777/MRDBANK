@@ -40,7 +40,7 @@ FIELD=SC,  3, N             /* INSTALLMENT-NUMBER
 FIELD=SD,  8, P, DE         /* DUE-DATE
                               /* YYYYMMDD. Descriptor for batch date range reads.
 
-FIELD=SE, 15, P             /* EMI-AMOUNT
+FIELD=SE, 5, P             /* EMI-AMOUNT
                               /* Total monthly instalment (principal + interest).
 
 FIELD=SF, 15, P             /* PRINCIPAL-COMPONENT
