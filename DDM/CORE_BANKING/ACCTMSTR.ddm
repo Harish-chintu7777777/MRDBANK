@@ -63,7 +63,7 @@ FIELD=AJ, 15, P, NV         /* AVAILABLE-BALANCE
 
 FIELD=AK, 15, P, NV         /* CLEARED-BALANCE
 
-FIELD=AL, 15, P, NV         /* UNCLEARED-BALANCE
+FIELD=AL, 7, P, NV         /* UNCLEARED-BALANCE
                               /* Cheques deposited not yet cleared.
 
 FIELD=AM, 15, P, NV         /* OVERDRAFT-LIMIT
