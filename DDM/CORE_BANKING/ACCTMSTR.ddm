@@ -31,7 +31,7 @@ FIELD=AA, 5, A, DE         /* ACCOUNT-NUMBER
                               /* B=Branch(4) T=Type(3) N=Seq(4) C=Check.
                               /* Luhn mod-10 validated by CBACVD01.
 
-FIELD=AB, 10, A, DE         /* CUSTOMER-ID
+FIELD=AB, 7, A, DE         /* CUSTOMER-ID
                               /* Descriptor. -> FILE 050 AA.
                               /* Referential integrity enforced by Natural.
 
