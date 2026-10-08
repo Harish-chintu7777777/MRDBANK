@@ -46,7 +46,7 @@ FIELD=AE,  2, A, DE,FI      /* ACCOUNT-STATUS
                               /* FR=Frozen  LN=Lien     SZ=Seized
                               /* FI: critical for batch range reads.
 
-FIELD=AF,  8, P, DE         /* DATE-OPENED
+FIELD=AF,  18, P, DE         /* DATE-OPENED
                               /* YYYYMMDD packed. Descriptor for cohorts.
 
 FIELD=AG,  8, P, NV         /* DATE-CLOSED
