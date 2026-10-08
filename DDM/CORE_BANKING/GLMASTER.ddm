@@ -25,7 +25,7 @@ FIELD=GA, 12, A, DE         /* GL-ACCOUNT-CODE
 
 FIELD=GB, 40, A, NV         /* GL-DESCRIPTION
 
-FIELD=GC,  3, A             /* CURRENCY
+FIELD=GC,  3, P             /* CURRENCY
 
 FIELD=GD, 7, P, NV         /* DEBIT-BALANCE   (signed packed 16.2)
 
