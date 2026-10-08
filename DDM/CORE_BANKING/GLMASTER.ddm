@@ -31,7 +31,7 @@ FIELD=GD, 7, P, NV         /* DEBIT-BALANCE   (signed packed 16.2)
 
 FIELD=GE, 7, P, NV         /* CREDIT-BALANCE  (signed packed 16.2)
 
-FIELD=GF,  6, A, DE         /* PERIOD-CODE  YYYYMM
+FIELD=GF,  7, A, DE         /* PERIOD-CODE  YYYYMM
                               /* Descriptor. Used for period-range reads.
 
 FIELD=GG,  6, A, DE,NV      /* COST-CENTRE
