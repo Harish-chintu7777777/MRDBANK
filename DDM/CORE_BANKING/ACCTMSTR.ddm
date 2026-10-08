@@ -38,7 +38,7 @@ FIELD=AB, 7, A, DE         /* CUSTOMER-ID
 FIELD=AC,  6, A, DE         /* PRODUCT-CODE
                               /* -> FILE 110 PA (Product Master).
 
-FIELD=AD,  4, A, DE         /* ACCOUNT-TYPE
+FIELD=AD,  8, A, DE         /* ACCOUNT-TYPE
                               /* CURR SAVG FIXD CALL FCCY ODRFT
 
 FIELD=AE,  2, A, DE,FI      /* ACCOUNT-STATUS
