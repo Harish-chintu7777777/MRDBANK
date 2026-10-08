@@ -32,7 +32,7 @@ DEFINE DATA
       2 AB    /* CUSTOMER-ID
       2 AC    /* PRODUCT-CODE
       2 AD    /* ACCOUNT-TYPE
-      2 AE    /* ACCOUNT-STATUS
+      2 AE    /* ACCOUNT-STATUS (3 chars: AC/DM/CL/FR/LN/SZ/PD)
       2 AF    /* DATE-OPENED
       2 AG    /* DATE-CLOSED
       2 AH    /* CURRENCY-CODE
@@ -103,6 +103,14 @@ IF #P-RESPONSE-CODE = 0
   /* This means no record was found.
   MOVE 1011 TO #P-RESPONSE-CODE
   MOVE 'ACCOUNT NOT FOUND IN FILE 100' TO #P-RESPONSE-TEXT
+END-IF
+
+* ── NEW: Account Status Validation for KYC Workflow ─────────
+IF #P-RESPONSE-CODE = 0000
+  IF ACCT-VIEW.AE = 'PD'  /* Pending KYC status
+    MOVE 1020 TO #P-RESPONSE-CODE
+    MOVE 'ACCOUNT IN PENDING KYC STATUS - READ ONLY' TO #P-RESPONSE-TEXT
+  END-IF
 END-IF
 
 ESCAPE ROUTINE
